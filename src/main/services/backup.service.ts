@@ -1,0 +1,492 @@
+import { createHash } from 'node:crypto'
+import { createReadStream, createWriteStream } from 'node:fs'
+import { access, lstat, mkdir, opendir, realpath, stat, utimes } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
+import { pipeline } from 'node:stream/promises'
+import type {
+  BackupFileFilter,
+  BackupSelection,
+  BackupTimeSlot,
+  OperationProgress,
+  RemovableDrive,
+  VerificationMode
+} from '../../shared/types'
+import { PROGRESS_EVENT_INTERVAL_MS } from '../../shared/constants'
+import { SdManagerError } from './errors'
+
+interface SourceFile {
+  sourceRelativePath: string
+  destinationRelativePath: string
+  size: number
+  modifiedAt: Date
+}
+
+const WINDOWS_VOLUME_METADATA_DIRECTORY = 'system volume information'
+
+function backupDestinationRoot(backupRoot: string, createBackupFolder: boolean, timeSlot: BackupTimeSlot): string {
+  const now = new Date()
+  const digits = (value: number): string => value.toString().padStart(2, '0')
+  const dateFolder = `${now.getFullYear()}-${digits(now.getMonth() + 1)}-${digits(now.getDate())}`
+  const parent = createBackupFolder ? join(backupRoot, dateFolder) : backupRoot
+  if (timeSlot === 'day') return join(parent, '1')
+  if (timeSlot === 'night') return join(parent, '2')
+  return parent
+}
+
+export interface BackupResult {
+  destination: string
+  files: SourceFile[]
+  totalBytes: number
+  selection?: BackupSelection
+}
+
+type ProgressListener = (progress: OperationProgress) => void
+
+function isPathInsideRoot(root: string, target: string): boolean {
+  const pathFromRoot = relative(root, target)
+  return Boolean(pathFromRoot) && pathFromRoot !== '..' && !pathFromRoot.startsWith(`..${sep}`) && !isAbsolute(pathFromRoot)
+}
+
+function validateRelativeSourceFolder(relativePath: string): string {
+  const normalized = normalize(relativePath.trim())
+  if (!relativePath.trim() || normalized === '.' || normalized === '..' || normalized.startsWith(`..${sep}`) || isAbsolute(normalized)) {
+    throw new SdManagerError('INVALID_REQUEST', 'SD 카드 내부의 하위 폴더를 선택하세요.')
+  }
+  const firstSegment = normalized.split(sep)[0]?.toLowerCase()
+  if (firstSegment === WINDOWS_VOLUME_METADATA_DIRECTORY) {
+    throw new SdManagerError('INVALID_REQUEST', 'Windows 시스템 관리 폴더는 백업 대상으로 선택할 수 없습니다.')
+  }
+  return normalized
+}
+
+async function resolveSourceFolderFromRoot(cardRoot: string, relativePath: string): Promise<{ root: string; relativePath: string }> {
+  try {
+    const driveRoot = await realpath(cardRoot)
+    const requested = resolve(driveRoot, validateRelativeSourceFolder(relativePath))
+    const sourceRoot = await realpath(requested)
+    const metadata = await stat(sourceRoot)
+    if (!metadata.isDirectory() || !isPathInsideRoot(driveRoot, sourceRoot)) {
+      throw new SdManagerError('INVALID_REQUEST', '선택한 폴더가 현재 SD 카드 내부에 있지 않습니다.')
+    }
+    const canonicalRelativePath = relative(driveRoot, sourceRoot)
+    validateRelativeSourceFolder(canonicalRelativePath)
+    return { root: sourceRoot, relativePath: canonicalRelativePath }
+  } catch (error) {
+    if (error instanceof SdManagerError) throw error
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENODEV') {
+      throw new SdManagerError('DEVICE_REMOVED', '선택한 백업 폴더를 찾을 수 없습니다.')
+    }
+    if (code === 'EACCES' || code === 'EPERM') {
+      throw new SdManagerError('PERMISSION_DENIED', '선택한 백업 폴더에 접근할 수 없습니다.')
+    }
+    throw new SdManagerError('BACKUP_FAILED', '선택한 백업 폴더를 확인하지 못했습니다.', error instanceof Error ? error.message : undefined)
+  }
+}
+
+async function relativeSourceFolderFromPath(cardRoot: string, selectedPath: string): Promise<string> {
+  try {
+    const driveRoot = await realpath(cardRoot)
+    const sourceRoot = await realpath(selectedPath)
+    const metadata = await stat(sourceRoot)
+    if (!metadata.isDirectory() || !isPathInsideRoot(driveRoot, sourceRoot)) {
+      throw new SdManagerError('INVALID_REQUEST', '선택한 폴더가 현재 SD 카드 내부에 있지 않습니다.')
+    }
+    return validateRelativeSourceFolder(relative(driveRoot, sourceRoot))
+  } catch (error) {
+    if (error instanceof SdManagerError) throw error
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENODEV') {
+      throw new SdManagerError('DEVICE_REMOVED', '선택한 백업 폴더를 찾을 수 없습니다.')
+    }
+    if (code === 'EACCES' || code === 'EPERM') {
+      throw new SdManagerError('PERMISSION_DENIED', '선택한 백업 폴더에 접근할 수 없습니다.')
+    }
+    throw new SdManagerError('BACKUP_FAILED', '선택한 백업 폴더를 확인하지 못했습니다.', error instanceof Error ? error.message : undefined)
+  }
+}
+
+async function resolveSourceFileFromRoot(cardRoot: string, relativePath: string): Promise<{ absolutePath: string; relativePath: string }> {
+  try {
+    const driveRoot = await realpath(cardRoot)
+    const requested = resolve(driveRoot, validateRelativeSourceFolder(relativePath))
+    const requestedMetadata = await lstat(requested)
+    if (requestedMetadata.isSymbolicLink()) {
+      throw new SdManagerError('BACKUP_FAILED', '심볼릭 링크는 백업 파일로 선택할 수 없습니다.', relativePath)
+    }
+    const absolutePath = await realpath(requested)
+    const metadata = await stat(absolutePath)
+    if (!metadata.isFile() || !isPathInsideRoot(driveRoot, absolutePath)) {
+      throw new SdManagerError('INVALID_REQUEST', '선택한 파일이 현재 SD 카드 내부에 있지 않습니다.')
+    }
+    const canonicalRelativePath = validateRelativeSourceFolder(relative(driveRoot, absolutePath))
+    return { absolutePath, relativePath: canonicalRelativePath }
+  } catch (error) {
+    if (error instanceof SdManagerError) throw error
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENODEV') {
+      throw new SdManagerError('DEVICE_REMOVED', '선택한 백업 파일을 찾을 수 없습니다.')
+    }
+    if (code === 'EACCES' || code === 'EPERM') {
+      throw new SdManagerError('PERMISSION_DENIED', '선택한 백업 파일에 접근할 수 없습니다.')
+    }
+    throw new SdManagerError('BACKUP_FAILED', '선택한 백업 파일을 확인하지 못했습니다.', error instanceof Error ? error.message : undefined)
+  }
+}
+
+async function relativeSourceFilesFromPaths(cardRoot: string, selectedPaths: string[]): Promise<string[]> {
+  const driveRoot = await realpath(cardRoot)
+  const relativePaths: string[] = []
+  const selected = new Set<string>()
+  for (const selectedPath of selectedPaths) {
+    const relativePath = relative(driveRoot, selectedPath)
+    const resolved = await resolveSourceFileFromRoot(driveRoot, relativePath)
+    const key = resolved.relativePath.toLowerCase()
+    if (!selected.has(key)) {
+      selected.add(key)
+      relativePaths.push(resolved.relativePath)
+    }
+  }
+  if (relativePaths.length === 0) {
+    throw new SdManagerError('INVALID_REQUEST', '백업할 파일을 하나 이상 선택하세요.')
+  }
+  return relativePaths
+}
+
+function includesFile(filePath: string, filter: BackupFileFilter): boolean {
+  return filter === 'all' || extname(filePath).toLowerCase() === '.mp4'
+}
+
+async function collectFiles(
+  cardRoot: string,
+  sourceRoot: string,
+  filter: BackupFileFilter,
+  signal: AbortSignal
+): Promise<SourceFile[]> {
+  const files: SourceFile[] = []
+
+  async function walk(current: string): Promise<void> {
+    if (signal.aborted) throw new SdManagerError('BACKUP_CANCELLED', '백업이 취소되었습니다.')
+    const directory = await opendir(current)
+    for await (const entry of directory) {
+      if (current === cardRoot && entry.isDirectory() && entry.name.toLowerCase() === WINDOWS_VOLUME_METADATA_DIRECTORY) {
+        continue
+      }
+      const absolutePath = join(current, entry.name)
+      if (entry.isSymbolicLink()) {
+        throw new SdManagerError('BACKUP_FAILED', '심볼릭 링크가 포함된 카드는 안전하게 백업할 수 없습니다.', absolutePath)
+      }
+      if (entry.isDirectory()) await walk(absolutePath)
+      else if (entry.isFile() && includesFile(absolutePath, filter)) {
+        const metadata = await stat(absolutePath)
+        const sourceRelativePath = relative(cardRoot, absolutePath)
+        files.push({ sourceRelativePath, destinationRelativePath: sourceRelativePath, size: metadata.size, modifiedAt: metadata.mtime })
+      }
+    }
+  }
+
+  await walk(sourceRoot)
+  return files
+}
+
+async function collectSelectedFiles(cardRoot: string, relativePaths: string[]): Promise<SourceFile[]> {
+  const files: SourceFile[] = []
+  const selected = new Set<string>()
+  for (const relativePath of relativePaths) {
+    const resolved = await resolveSourceFileFromRoot(cardRoot, relativePath)
+    const key = resolved.relativePath.toLowerCase()
+    if (selected.has(key)) continue
+    selected.add(key)
+    const metadata = await stat(resolved.absolutePath)
+    files.push({
+      sourceRelativePath: resolved.relativePath,
+      destinationRelativePath: basename(resolved.relativePath),
+      size: metadata.size,
+      modifiedAt: metadata.mtime
+    })
+  }
+  return files
+}
+
+async function getMetadataIfPresent(targetPath: string) {
+  try {
+    return await stat(targetPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+function addNumericSuffix(relativePath: string, suffix: number): string {
+  const extension = extname(relativePath)
+  const fileName = basename(relativePath, extension)
+  return join(dirname(relativePath), `${fileName}_${suffix}${extension}`)
+}
+
+async function assignAvailableDestinationPaths(destination: string, files: SourceFile[]): Promise<SourceFile[]> {
+  const root = resolve(destination)
+  const reservedPaths = new Set<string>()
+  const assignedFiles: SourceFile[] = []
+  for (const file of files) {
+    const originalTargetPath = resolve(destination, file.destinationRelativePath)
+    if (!isPathInsideRoot(root, originalTargetPath)) {
+      throw new SdManagerError('BACKUP_DESTINATION_UNAVAILABLE', '안전하지 않은 백업 대상 경로가 감지되었습니다.')
+    }
+    let parent = dirname(originalTargetPath)
+    while (parent !== root) {
+      const metadata = await getMetadataIfPresent(parent)
+      if (metadata && !metadata.isDirectory()) {
+        throw new SdManagerError(
+          'BACKUP_DESTINATION_UNAVAILABLE',
+          '백업 경로의 기존 파일과 원본 폴더 구조가 충돌합니다.',
+          relative(root, parent)
+        )
+      }
+      const nextParent = dirname(parent)
+      if (nextParent === parent) break
+      parent = nextParent
+    }
+    let assigned = false
+    for (let suffix = 0; suffix <= 9999; suffix += 1) {
+      const destinationRelativePath = suffix === 0
+        ? file.destinationRelativePath
+        : addNumericSuffix(file.destinationRelativePath, suffix)
+      const targetPath = resolve(destination, destinationRelativePath)
+      const key = targetPath.toLowerCase()
+      if (reservedPaths.has(key) || await getMetadataIfPresent(targetPath)) continue
+      reservedPaths.add(key)
+      assignedFiles.push({ ...file, destinationRelativePath })
+      assigned = true
+      break
+    }
+    if (!assigned) {
+      throw new SdManagerError('BACKUP_DESTINATION_UNAVAILABLE', '중복되지 않는 백업 파일 이름을 만들 수 없습니다.')
+    }
+  }
+  return assignedFiles
+}
+
+async function hashFile(filePath: string): Promise<string> {
+  const hash = createHash('sha256')
+  await pipeline(createReadStream(filePath), hash)
+  return hash.digest('hex')
+}
+
+export class BackupService {
+  async relativeSourceFolder(drive: RemovableDrive, selectedPath: string): Promise<string> {
+    return relativeSourceFolderFromPath(drive.mountPath, selectedPath)
+  }
+
+  async relativeSourceFiles(drive: RemovableDrive, selectedPaths: string[]): Promise<string[]> {
+    return relativeSourceFilesFromPaths(drive.mountPath, selectedPaths)
+  }
+
+  async assertBackupSelectionAvailable(drive: RemovableDrive, selection: BackupSelection | undefined): Promise<void> {
+    if (!selection) return
+    if (selection.kind === 'folder') {
+      if (selection.fileFilter !== 'all' && selection.fileFilter !== 'mp4') {
+        throw new SdManagerError('INVALID_REQUEST', '백업 파일 범위가 올바르지 않습니다.')
+      }
+      if (typeof selection.includeSourceFolder !== 'boolean') {
+        throw new SdManagerError('INVALID_REQUEST', '선택 폴더 포함 옵션이 올바르지 않습니다.')
+      }
+      await resolveSourceFolderFromRoot(drive.mountPath, selection.relativePath)
+      return
+    }
+    if (selection.kind !== 'files' || selection.relativePaths.length === 0) {
+      throw new SdManagerError('INVALID_REQUEST', '백업할 파일을 하나 이상 선택하세요.')
+    }
+    await collectSelectedFiles(drive.mountPath, selection.relativePaths)
+  }
+
+  async assertBackupRootAvailable(backupRoot: string): Promise<void> {
+    try {
+      const metadata = await stat(backupRoot)
+      if (!metadata.isDirectory()) throw new Error('Not a directory')
+      await access(backupRoot, constants.W_OK)
+    } catch (error) {
+      throw new SdManagerError(
+        'BACKUP_DESTINATION_UNAVAILABLE',
+        '백업 경로에 접근하거나 쓸 수 없습니다.',
+        error instanceof Error ? error.message : undefined
+      )
+    }
+  }
+
+  assertBackupRootOutsideSource(sourceRoot: string, backupRoot: string): void {
+    const source = resolve(sourceRoot)
+    const target = resolve(backupRoot)
+    if (target === source || isPathInsideRoot(source, target)) {
+      throw new SdManagerError('BACKUP_DESTINATION_ON_SOURCE', '백업 경로를 SD 카드 내부로 지정할 수 없습니다.')
+    }
+  }
+
+  async backup(
+    drive: RemovableDrive,
+    backupRoot: string,
+    backupTimeSlot: BackupTimeSlot,
+    createBackupFolder: boolean,
+    backupSelection: BackupSelection | undefined,
+    signal: AbortSignal,
+    onProgress: ProgressListener
+  ): Promise<BackupResult> {
+    this.assertBackupRootOutsideSource(drive.mountPath, backupRoot)
+    await this.assertBackupRootAvailable(backupRoot)
+    const destinationRoot = backupDestinationRoot(backupRoot, createBackupFolder, backupTimeSlot)
+    if (destinationRoot !== backupRoot) {
+      try {
+        await mkdir(destinationRoot, { recursive: true })
+      } catch (error) {
+        throw new SdManagerError(
+          'BACKUP_DESTINATION_UNAVAILABLE',
+          '백업 폴더를 만들 수 없습니다.',
+          error instanceof Error ? error.message : undefined
+        )
+      }
+    }
+    let files: SourceFile[]
+    let selection: BackupSelection | undefined
+    try {
+      const cardRoot = await realpath(drive.mountPath)
+      if (!backupSelection) {
+        files = await collectFiles(cardRoot, cardRoot, 'all', signal)
+      } else if (backupSelection.kind === 'folder') {
+        const selectedSource = await resolveSourceFolderFromRoot(cardRoot, backupSelection.relativePath)
+        selection = {
+          kind: 'folder',
+          relativePath: selectedSource.relativePath,
+          fileFilter: backupSelection.fileFilter,
+          includeSourceFolder: backupSelection.includeSourceFolder
+        }
+        files = await collectFiles(cardRoot, selectedSource.root, backupSelection.fileFilter, signal)
+        if (!selection.includeSourceFolder) {
+          files = files.map((file) => ({
+            ...file,
+            destinationRelativePath: relative(selectedSource.root, join(cardRoot, file.sourceRelativePath))
+          }))
+        }
+      } else {
+        files = await collectSelectedFiles(cardRoot, backupSelection.relativePaths)
+        selection = {
+          kind: 'files',
+          relativePaths: files.map((file) => file.sourceRelativePath)
+        }
+      }
+    } catch (error) {
+      if (error instanceof SdManagerError) throw error
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new SdManagerError('DEVICE_REMOVED', '백업 준비 중 SD 카드가 제거되었습니다.')
+      }
+      throw new SdManagerError('BACKUP_FAILED', '백업할 파일 목록을 읽지 못했습니다.', error instanceof Error ? error.message : undefined)
+    }
+    if (selection && files.length === 0) {
+      throw new SdManagerError('BACKUP_FAILED', '선택한 백업 대상에 조건과 일치하는 파일이 없습니다. SD 카드는 포맷하지 않습니다.')
+    }
+    const totalBytes = files.reduce((sum, file) => sum + file.size, 0)
+    const destination = destinationRoot
+    files = await assignAvailableDestinationPaths(destination, files)
+    let copiedBytes = 0
+    let processedFiles = 0
+    let lastProgressAt = 0
+
+    const publish = (currentFile?: string, force = false): void => {
+      const now = Date.now()
+      if (!force && now - lastProgressAt < PROGRESS_EVENT_INTERVAL_MS) return
+      lastProgressAt = now
+      onProgress({
+        processedFiles,
+        totalFiles: files.length,
+        copiedBytes,
+        totalBytes,
+        percent: totalBytes === 0 ? (processedFiles === files.length ? 100 : 0) : Math.min(100, Math.round((copiedBytes / totalBytes) * 100)),
+        ...(currentFile ? { currentFile } : {})
+      })
+    }
+
+    publish(undefined, true)
+    for (const file of files) {
+      if (signal.aborted) throw new SdManagerError('BACKUP_CANCELLED', '백업이 취소되었습니다.')
+      const sourcePath = join(drive.mountPath, file.sourceRelativePath)
+      const targetPath = join(destination, file.destinationRelativePath)
+      await mkdir(dirname(targetPath), { recursive: true })
+      const source = createReadStream(sourcePath)
+      source.on('data', (chunk: string | Buffer) => {
+        copiedBytes += Buffer.byteLength(chunk)
+        publish(file.sourceRelativePath)
+      })
+      try {
+        await pipeline(source, createWriteStream(targetPath, { flags: 'wx' }), { signal })
+        await utimes(targetPath, file.modifiedAt, file.modifiedAt)
+      } catch (error) {
+        if (signal.aborted) throw new SdManagerError('BACKUP_CANCELLED', '백업이 취소되었습니다.')
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new SdManagerError('DEVICE_REMOVED', '백업 중 SD 카드가 제거되었습니다.')
+        }
+        throw new SdManagerError('BACKUP_FAILED', '파일 백업 중 오류가 발생했습니다.', error instanceof Error ? error.message : undefined)
+      }
+      processedFiles += 1
+      publish(file.sourceRelativePath, true)
+    }
+
+    return { destination, files, totalBytes, ...(selection ? { selection } : {}) }
+  }
+
+  async verify(sourceRoot: string, backup: BackupResult, mode: VerificationMode): Promise<void> {
+    try {
+      const cardRoot = await realpath(sourceRoot)
+      let currentFiles: SourceFile[]
+      if (!backup.selection) {
+        currentFiles = await collectFiles(cardRoot, cardRoot, 'all', new AbortController().signal)
+      } else if (backup.selection.kind === 'folder') {
+        const selectedSource = await resolveSourceFolderFromRoot(cardRoot, backup.selection.relativePath)
+        currentFiles = await collectFiles(
+          cardRoot,
+          selectedSource.root,
+          backup.selection.fileFilter,
+          new AbortController().signal
+        )
+      } else {
+        currentFiles = await collectSelectedFiles(cardRoot, backup.selection.relativePaths)
+      }
+      const expectedFiles = new Map(backup.files.map((file) => [file.sourceRelativePath, file.size]))
+      const sourceSnapshotMatches =
+        currentFiles.length === backup.files.length &&
+        currentFiles.every((file) => expectedFiles.get(file.sourceRelativePath) === file.size)
+      if (!sourceSnapshotMatches) {
+        throw new Error('Source file list or size changed')
+      }
+    } catch (error) {
+      if (error instanceof SdManagerError && ['DEVICE_REMOVED', 'PERMISSION_DENIED'].includes(error.code)) throw error
+      throw new SdManagerError(
+        'BACKUP_VERIFICATION_FAILED',
+        '백업 중 원본 파일 목록 또는 크기가 변경되었습니다. SD 카드는 포맷하지 않습니다.',
+        error instanceof Error ? error.message : undefined
+      )
+    }
+
+    let verifiedBytes = 0
+    for (const file of backup.files) {
+      const sourcePath = join(sourceRoot, file.sourceRelativePath)
+      const targetPath = join(backup.destination, file.destinationRelativePath)
+      try {
+        const target = await stat(targetPath)
+        if (!target.isFile() || target.size !== file.size) throw new Error('Size mismatch')
+        verifiedBytes += target.size
+        if (mode === 'full') {
+          const [sourceHash, targetHash] = await Promise.all([hashFile(sourcePath), hashFile(targetPath)])
+          if (sourceHash !== targetHash) throw new Error('Hash mismatch')
+        }
+      } catch (error) {
+        throw new SdManagerError(
+          'BACKUP_VERIFICATION_FAILED',
+          '백업 검증에 실패했습니다. SD 카드는 포맷하지 않습니다.',
+          `${file.destinationRelativePath}: ${error instanceof Error ? error.message : 'Unknown error'}`
+        )
+      }
+    }
+    if (verifiedBytes !== backup.totalBytes) {
+      throw new SdManagerError('BACKUP_VERIFICATION_FAILED', '백업 파일 크기 합계가 원본과 일치하지 않습니다.')
+    }
+  }
+}

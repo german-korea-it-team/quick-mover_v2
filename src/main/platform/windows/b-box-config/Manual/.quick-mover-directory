@@ -1,0 +1,1 @@
+Preserves this required empty directory in packaged builds. It is not copied to SD cards.
