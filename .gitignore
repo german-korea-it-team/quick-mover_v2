@@ -1,0 +1,8 @@
+node_modules/
+out/
+dist/
+release/
+playwright-report/
+test-results/
+.quick-mover-test-data/
+*.log
