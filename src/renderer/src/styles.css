@@ -1,0 +1,209 @@
+:root {
+  font-family: "Noto Sans KR", "Malgun Gothic", "Segoe UI", sans-serif;
+  color: #1f2933;
+  background: #f4f5f7;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+html,
+body,
+#app {
+  min-width: 900px;
+  min-height: 100%;
+  margin: 0;
+}
+
+.workspace {
+  max-width: 1800px;
+  margin: 0 auto;
+  padding: 16px 20px 24px;
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: 88px 300px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.section-label {
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.panel {
+  overflow: hidden;
+  margin-bottom: 12px;
+  border: 1px solid #d8dde3;
+  background: #fff;
+}
+
+.panel-header {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  border-bottom: 1px solid #e2e6ea;
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: 0.94rem;
+  line-height: 1.3;
+}
+
+.v-table th {
+  height: 36px !important;
+  color: #45515d !important;
+  background: #f7f8fa !important;
+  font-size: 0.75rem !important;
+  font-weight: 700 !important;
+  white-space: nowrap;
+}
+
+.v-table td {
+  height: 48px !important;
+  font-size: 0.82rem !important;
+}
+
+.profile-column {
+  min-width: 150px;
+}
+
+.time-slot-column {
+  min-width: 130px;
+}
+
+.name-column {
+  min-width: 150px;
+}
+
+.backup-path-column {
+  width: 270px;
+}
+
+.backup-folder-column {
+  width: 125px;
+}
+
+.table-header-with-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.source-scope-column {
+  width: 240px;
+}
+
+.format-label-column {
+  min-width: 150px;
+}
+
+.action-column {
+  width: 100px;
+}
+
+.progress-column {
+  width: 220px;
+}
+
+.progress-cell {
+  display: grid;
+  grid-template-columns: 1fr 38px;
+  align-items: center;
+  gap: 8px;
+}
+
+.result-cell {
+  overflow: hidden;
+  max-width: 360px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty-row {
+  height: 84px !important;
+  color: #687581;
+  text-align: center !important;
+}
+
+.drive-table .v-field,
+.verification-select .v-field {
+  font-size: 0.82rem;
+}
+
+.drive-table th,
+.drive-table td {
+  text-align: center !important;
+}
+
+.drive-table .v-text-field input {
+  text-align: start;
+}
+
+.drive-table .v-select__selection,
+.drive-table .v-switch .v-selection-control {
+  justify-content: center;
+}
+
+.truncate-field {
+  min-width: 0;
+  max-width: 150px;
+}
+
+.favorite-menu-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.favorite-menu .v-list-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.favorite-empty {
+  padding: 18px 16px;
+}
+
+.truncate-field input:not(:focus) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drive-backup-path {
+  display: flex;
+  min-width: 240px;
+  align-items: center;
+  gap: 2px;
+}
+
+.source-scope {
+  display: flex;
+  min-width: 210px;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 3px;
+}
+
+.path-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tooltip-detail {
+  white-space: pre-line;
+}
+
+.text-error {
+  color: #b42318;
+}
