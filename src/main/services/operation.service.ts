@@ -14,6 +14,7 @@ import { FormatService } from './format.service'
 import { LoggerService } from './logger.service'
 import { normalizeVolumeLabel, validateVolumeLabel } from '../../shared/volume-label'
 import { BlackBoxConfigService } from './black-box-config.service'
+import { isValidBackupDate } from '../../shared/backup-date'
 
 interface QueueItem {
   operationId: string
@@ -70,6 +71,15 @@ function validateRequest(request: ProcessSdCardRequest): void {
   }
   if (typeof request.createBackupFolder !== 'boolean') {
     throw new SdManagerError('INVALID_REQUEST', '백업 폴더 생성 옵션이 올바르지 않습니다.')
+  }
+  if (request.backupDateMode !== 'auto' && request.backupDateMode !== 'manual') {
+    throw new SdManagerError('INVALID_REQUEST', '상위 폴더 날짜 방식이 올바르지 않습니다.')
+  }
+  if (request.backupDate !== undefined && !isValidBackupDate(request.backupDate)) {
+    throw new SdManagerError('INVALID_REQUEST', '상위 폴더 날짜가 올바르지 않습니다.')
+  }
+  if (request.createBackupFolder && request.backupDateMode === 'manual' && !request.backupDate) {
+    throw new SdManagerError('INVALID_REQUEST', '상위 폴더에 사용할 날짜를 직접 선택하세요.')
   }
   if (request.backupSelection !== undefined) {
     if (!request.backupSelection || typeof request.backupSelection !== 'object') {
@@ -155,6 +165,8 @@ export class OperationService {
         displayName: request.displayName?.trim() || undefined,
         profile: request.profile,
         backupTimeSlot: request.backupTimeSlot,
+        backupDateMode: request.backupDateMode,
+        backupDate: request.backupDate,
         backupSourceFolder: request.backupSelection?.kind === 'folder' ? request.backupSelection.relativePath : undefined,
         backupFileFilter: request.backupSelection?.kind === 'folder' ? request.backupSelection.fileFilter : undefined,
         backupSelectedFileCount: request.backupSelection?.kind === 'files' ? request.backupSelection.relativePaths.length : undefined,
@@ -235,6 +247,8 @@ export class OperationService {
         item.request.backupRoot,
         item.request.backupTimeSlot,
         item.request.createBackupFolder,
+        item.request.backupDateMode,
+        item.request.backupDate,
         item.request.backupSelection,
         abortController.signal,
         (progress) => {

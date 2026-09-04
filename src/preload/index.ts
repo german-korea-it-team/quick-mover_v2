@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AppSettings, ProcessSdCardRequest, RemovableDrive, SdManagerApi, SdOperation } from '../shared/types'
+import type {
+  AppSettings,
+  DetectBackupDateRequest,
+  ProcessSdCardRequest,
+  RemovableDrive,
+  SdManagerApi,
+  SdOperation
+} from '../shared/types'
 import { IPC_CHANNELS } from '../shared/ipc'
 
 const api: SdManagerApi = {
@@ -7,6 +14,7 @@ const api: SdManagerApi = {
   chooseBackupRoot: (defaultPath?: string) => ipcRenderer.invoke(IPC_CHANNELS.backupChooseRoot, defaultPath),
   chooseSourceFolder: (driveId: string) => ipcRenderer.invoke(IPC_CHANNELS.backupChooseSourceFolder, driveId),
   chooseSourceFiles: (driveId: string) => ipcRenderer.invoke(IPC_CHANNELS.backupChooseSourceFiles, driveId),
+  detectBackupDate: (request: DetectBackupDateRequest) => ipcRenderer.invoke(IPC_CHANNELS.backupDetectDate, request),
   getSettings: () => ipcRenderer.invoke(IPC_CHANNELS.settingsGet),
   saveSettings: (settings: AppSettings) => ipcRenderer.invoke(IPC_CHANNELS.settingsSave, settings),
   startProcess: (request: ProcessSdCardRequest) => ipcRenderer.invoke(IPC_CHANNELS.operationStart, request),

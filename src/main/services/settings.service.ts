@@ -1,11 +1,45 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import type { AppSettings, SdCardSettings } from '../../shared/types'
+import type { AppSettings, BackupFolderSelection, SavedCardPreset, SdCardSettings } from '../../shared/types'
+import { normalizeVolumeLabel, validateVolumeLabel } from '../../shared/volume-label'
 
 const DEFAULT_SETTINGS: AppSettings = {
   backupFavoritePaths: [],
   verificationMode: 'fast',
-  cardSettings: {}
+  cardSettings: {},
+  savedCardPresets: []
+}
+
+function optionalDisplayName(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const displayName = value.trim()
+  return displayName && displayName.length <= 80 ? displayName : undefined
+}
+
+function optionalVolumeLabel(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const volumeLabel = normalizeVolumeLabel(value)
+  return volumeLabel && !validateVolumeLabel(volumeLabel) ? volumeLabel : undefined
+}
+
+function parseBackupFolderSelection(value: unknown): BackupFolderSelection | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const candidate = value as Record<string, unknown>
+  if (
+    candidate.kind !== 'folder' ||
+    typeof candidate.relativePath !== 'string' ||
+    !candidate.relativePath.trim() ||
+    (candidate.fileFilter !== 'all' && candidate.fileFilter !== 'mp4') ||
+    typeof candidate.includeSourceFolder !== 'boolean'
+  ) {
+    return undefined
+  }
+  return {
+    kind: 'folder',
+    relativePath: candidate.relativePath.trim(),
+    fileFilter: candidate.fileFilter,
+    includeSourceFolder: candidate.includeSourceFolder
+  }
 }
 
 function parseBackupFavoritePaths(value: unknown): string[] {
@@ -36,12 +70,72 @@ function parseCardSettings(
     const backupRoot = typeof candidate.backupRoot === 'string' ? candidate.backupRoot.trim() : legacyBackupRoot
     const createBackupFolder =
       typeof candidate.createBackupFolder === 'boolean' ? candidate.createBackupFolder : legacyCreateBackupFolder
+    const displayName = optionalDisplayName(candidate.displayName)
+    const formatVolumeLabel = optionalVolumeLabel(candidate.formatVolumeLabel)
     settings[physicalDiskIdentifier] = {
+      ...(displayName ? { displayName } : {}),
+      ...(formatVolumeLabel ? { formatVolumeLabel } : {}),
       ...(backupRoot ? { backupRoot } : {}),
-      ...(createBackupFolder !== undefined ? { createBackupFolder } : {})
+      ...(createBackupFolder !== undefined ? { createBackupFolder } : {}),
+      ...(candidate.backupDateMode === 'auto' || candidate.backupDateMode === 'manual'
+        ? { backupDateMode: candidate.backupDateMode }
+        : {}),
+      ...(candidate.profile === 'blackbox' || candidate.profile === 'gps' ? { profile: candidate.profile } : {}),
+      ...(candidate.backupTimeSlot === 'single' || candidate.backupTimeSlot === 'day' || candidate.backupTimeSlot === 'night'
+        ? { backupTimeSlot: candidate.backupTimeSlot }
+        : {})
     }
     return settings
   }, {})
+}
+
+function parseSavedCardPresets(value: unknown): SavedCardPreset[] {
+  if (!Array.isArray(value)) return []
+  const presets: SavedCardPreset[] = []
+  const ids = new Set<string>()
+  const names = new Set<string>()
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const candidate = item as Record<string, unknown>
+    const id = typeof candidate.id === 'string' ? candidate.id.trim() : ''
+    const name = typeof candidate.name === 'string' ? candidate.name.trim() : ''
+    const backupRoot = typeof candidate.backupRoot === 'string' ? candidate.backupRoot.trim() : ''
+    const nameKey = name.toLowerCase()
+    if (
+      !id ||
+      id.length > 100 ||
+      !name ||
+      name.length > 80 ||
+      !backupRoot ||
+      ids.has(id) ||
+      names.has(nameKey) ||
+      (candidate.profile !== 'blackbox' && candidate.profile !== 'gps') ||
+      typeof candidate.createBackupFolder !== 'boolean' ||
+      (candidate.backupDateMode !== 'auto' && candidate.backupDateMode !== 'manual') ||
+      (candidate.backupTimeSlot !== 'single' && candidate.backupTimeSlot !== 'day' && candidate.backupTimeSlot !== 'night')
+    ) {
+      continue
+    }
+    ids.add(id)
+    names.add(nameKey)
+    const backupSelection = parseBackupFolderSelection(candidate.backupSelection)
+    const displayName = optionalDisplayName(candidate.displayName)
+    const formatVolumeLabel = optionalVolumeLabel(candidate.formatVolumeLabel)
+    presets.push({
+      id,
+      name,
+      ...(displayName ? { displayName } : {}),
+      ...(formatVolumeLabel ? { formatVolumeLabel } : {}),
+      profile: candidate.profile,
+      backupRoot,
+      createBackupFolder: candidate.createBackupFolder,
+      backupDateMode: candidate.backupDateMode,
+      backupTimeSlot: candidate.backupTimeSlot,
+      ...(backupSelection ? { backupSelection } : {})
+    })
+    if (presets.length >= 100) break
+  }
+  return presets
 }
 
 function parseSettings(value: unknown): AppSettings | undefined {
@@ -56,7 +150,8 @@ function parseSettings(value: unknown): AppSettings | undefined {
   return {
     backupFavoritePaths: parseBackupFavoritePaths(candidate.backupFavoritePaths),
     verificationMode: candidate.verificationMode,
-    cardSettings: parseCardSettings(candidate.cardSettings, legacyBackupRoot, legacyCreateBackupFolder)
+    cardSettings: parseCardSettings(candidate.cardSettings, legacyBackupRoot, legacyCreateBackupFolder),
+    savedCardPresets: parseSavedCardPresets(candidate.savedCardPresets)
   }
 }
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { RemovableDrive, SdOperation } from '../../shared/types'
+import type { RemovableDrive, SavedCardPreset, SdOperation } from '../../shared/types'
 import { useSdManager } from './composables/useSdManager'
 
 const {
@@ -9,6 +9,9 @@ const {
   profiles,
   backupTimeSlots,
   backupSelections,
+  manualBackupDates,
+  detectedBackupDates,
+  detectingDateDriveId,
   settings,
   loadingDrives,
   activeDriveIds,
@@ -19,7 +22,13 @@ const {
   chooseBackupRootForDrive,
   selectBackupFavoriteForDrive,
   createBackupFolderForDrive,
-  setCreateBackupFolderForDrive,
+  backupDateModeForDrive,
+  backupFolderModeForDrive,
+  backupDateForDrive,
+  setBackupFolderModeForDrive,
+  setManualBackupDateForDrive,
+  setProfileForDrive,
+  setBackupTimeSlotForDrive,
   chooseSourceFolder,
   chooseSourceFiles,
   clearBackupSelection,
@@ -31,7 +40,11 @@ const {
   setFolderFileFilterForDrive,
   includesSourceFolderForDrive,
   setIncludesSourceFolderForDrive,
+  saveCardPreset,
+  loadCardPreset,
+  removeCardPreset,
   saveSettings,
+  prepareStart,
   start,
   cancel
 } = useSdManager()
@@ -39,6 +52,9 @@ const {
 const confirmationDrive = ref<RemovableDrive>()
 const confirming = ref(false)
 const selectiveDataLossConfirmed = ref(false)
+const presetSaveDrive = ref<RemovableDrive>()
+const presetLoadDrive = ref<RemovableDrive>()
+const presetName = ref('')
 const latestOperations = computed(() => [...operations.value].reverse())
 
 const profileItems = [
@@ -50,6 +66,12 @@ const timeSlotItems = [
   { title: '단일', value: 'single' },
   { title: '주간', value: 'day' },
   { title: '야간', value: 'night' }
+]
+
+const backupFolderModeItems = [
+  { title: '파일명 자동', value: 'auto' },
+  { title: '날짜 직접 선택', value: 'manual' },
+  { title: '생성 안 함', value: 'none' }
 ]
 
 const verificationItems = [
@@ -105,7 +127,8 @@ function operationForDrive(driveId: string): SdOperation | undefined {
   return latestOperations.value.find((operation) => operation.driveId === driveId)
 }
 
-function requestStart(drive: RemovableDrive): void {
+async function requestStart(drive: RemovableDrive): Promise<void> {
+  if (!(await prepareStart(drive))) return
   selectiveDataLossConfirmed.value = false
   confirmationDrive.value = drive
 }
@@ -166,6 +189,56 @@ function isBackupRootForDriveFavorite(drive: RemovableDrive): boolean {
 function timeSlotLabel(drive: RemovableDrive): string {
   const timeSlot = backupTimeSlots[drive.id] ?? 'single'
   return timeSlotItems.find((item) => item.value === timeSlot)?.title ?? '단일'
+}
+
+function openPresetSave(drive: RemovableDrive): void {
+  presetName.value = cardSettingsForDrive(drive).displayName || drive.volumeLabel || ''
+  presetSaveDrive.value = drive
+}
+
+function closePresetSave(): void {
+  presetSaveDrive.value = undefined
+  presetName.value = ''
+}
+
+async function confirmPresetSave(): Promise<void> {
+  if (!presetSaveDrive.value) return
+  if (await saveCardPreset(presetSaveDrive.value, presetName.value)) closePresetSave()
+}
+
+function openPresetLoad(drive: RemovableDrive): void {
+  presetLoadDrive.value = drive
+}
+
+function closePresetLoad(): void {
+  presetLoadDrive.value = undefined
+}
+
+async function applyPreset(preset: SavedCardPreset): Promise<void> {
+  if (!presetLoadDrive.value) return
+  await loadCardPreset(presetLoadDrive.value, preset)
+  if (!error.value) closePresetLoad()
+}
+
+function presetSummary(preset: SavedCardPreset): string {
+  const profile = preset.profile === 'blackbox' ? '블랙박스' : 'GPS 로거'
+  const timeSlot = timeSlotItems.find((item) => item.value === preset.backupTimeSlot)?.title ?? '단일'
+  const folder = !preset.createBackupFolder
+    ? '상위 폴더 없음'
+    : preset.backupDateMode === 'auto'
+      ? '파일명 날짜 자동'
+      : '날짜 직접 선택'
+  return `${profile} · ${timeSlot} · ${folder} · ${preset.backupRoot}`
+}
+
+function backupDestinationDisplay(drive: RemovableDrive): string {
+  const parts: string[] = []
+  const backupDate = backupDateForDrive(drive)
+  if (createBackupFolderForDrive(drive) && backupDate) parts.push(backupDate)
+  if (backupTimeSlots[drive.id] === 'day') parts.push('1')
+  if (backupTimeSlots[drive.id] === 'night') parts.push('2')
+  const root = backupRootForDrive(drive).replace(/[\\/]+$/, '')
+  return parts.length > 0 ? `${root}\\${parts.join('\\')}` : root
 }
 
 async function confirmStart(): Promise<void> {
@@ -244,12 +317,12 @@ async function confirmStart(): Promise<void> {
                           v-bind="props"
                           icon="mdi-information-outline"
                           size="small"
-                          aria-label="상위 폴더 생성 설명"
+                          aria-label="상위 폴더 날짜 설명"
                         ></v-icon>
                       </template>
-                      oooo년-oo월-oo일 폴더를 생성한 후, 해당 폴더의 내부에 백업합니다.
+                      첫 번째 영상 파일명의 YYYY-MM-DD를 사용하거나 날짜를 직접 선택합니다.
                     </v-tooltip>
-                    <span>상위 폴더 생성</span>
+                    <span>상위 폴더 날짜</span>
                   </div>
                 </th>
                 <th class="source-scope-column">
@@ -276,6 +349,9 @@ async function confirmStart(): Promise<void> {
                     <span>시간대</span>
                   </div>
                 </th>
+                <th class="settings-action-column">
+                  설정
+                </th>
                 <th>상태</th>
                 <th class="action-column">
                   작업
@@ -284,7 +360,7 @@ async function confirmStart(): Promise<void> {
             </thead>
             <tbody>
               <tr v-if="drives.length === 0">
-                <td colspan="12" class="empty-row">
+                <td colspan="13" class="empty-row">
                   연결된 이동식 SD 카드가 없습니다.
                 </td>
               </tr>
@@ -420,16 +496,29 @@ async function confirmStart(): Promise<void> {
                   </div>
                 </td>
                 <td>
-                  <v-switch
-                    :model-value="createBackupFolderForDrive(drive)"
-                    aria-label="폴더 생성"
-                    color="primary"
-                    density="compact"
-                    hide-details
-                    :disabled="activeDriveIds.has(drive.id)"
-                    :data-testid="`create-backup-folder-${drive.driveLetter}`"
-                    @update:model-value="setCreateBackupFolderForDrive(drive, $event)"
-                  ></v-switch>
+                  <div class="backup-date-control">
+                    <v-select
+                      :model-value="backupFolderModeForDrive(drive)"
+                      :items="backupFolderModeItems"
+                      aria-label="상위 폴더 날짜 방식"
+                      density="compact"
+                      hide-details
+                      :disabled="activeDriveIds.has(drive.id)"
+                      :data-testid="`backup-folder-mode-${drive.driveLetter}`"
+                      @update:model-value="setBackupFolderModeForDrive(drive, $event)"
+                    ></v-select>
+                    <v-text-field
+                      v-if="backupFolderModeForDrive(drive) === 'manual'"
+                      :model-value="manualBackupDates[drive.id]"
+                      type="date"
+                      aria-label="상위 폴더 날짜"
+                      density="compact"
+                      hide-details
+                      :disabled="activeDriveIds.has(drive.id)"
+                      :data-testid="`manual-backup-date-${drive.driveLetter}`"
+                      @update:model-value="setManualBackupDateForDrive(drive, $event)"
+                    ></v-text-field>
+                  </div>
                 </td>
                 <td>
                   <div class="source-scope">
@@ -498,22 +587,47 @@ async function confirmStart(): Promise<void> {
                 </td>
                 <td>
                   <v-select
-                    v-model="profiles[drive.id]"
+                    :model-value="profiles[drive.id]"
                     :items="profileItems"
+                    placeholder="종류 선택"
                     hide-details
                     aria-label="카드 종류"
                     :disabled="activeDriveIds.has(drive.id)"
+                    @update:model-value="setProfileForDrive(drive, $event)"
                   ></v-select>
                 </td>
                 <td>
                   <v-select
-                    v-model="backupTimeSlots[drive.id]"
+                    :model-value="backupTimeSlots[drive.id]"
                     :items="timeSlotItems"
                     hide-details
                     aria-label="시간대"
                     :disabled="activeDriveIds.has(drive.id)"
                     :data-testid="`time-slot-${drive.driveLetter}`"
+                    @update:model-value="setBackupTimeSlotForDrive(drive, $event)"
                   ></v-select>
+                </td>
+                <td>
+                  <div class="preset-actions">
+                    <v-btn
+                      size="x-small"
+                      variant="text"
+                      :disabled="activeDriveIds.has(drive.id)"
+                      :data-testid="`load-settings-${drive.driveLetter}`"
+                      @click="openPresetLoad(drive)"
+                    >
+                      설정 불러오기
+                    </v-btn>
+                    <v-btn
+                      size="x-small"
+                      variant="text"
+                      :disabled="activeDriveIds.has(drive.id)"
+                      :data-testid="`save-settings-${drive.driveLetter}`"
+                      @click="openPresetSave(drive)"
+                    >
+                      설정 값 저장
+                    </v-btn>
+                  </div>
                 </td>
                 <td>
                   <v-chip v-if="operationForDrive(drive.id)" size="small" :color="stateColor(operationForDrive(drive.id)!.state)" variant="tonal">
@@ -527,7 +641,8 @@ async function confirmStart(): Promise<void> {
                   <v-btn
                     size="small"
                     color="primary"
-                    :disabled="activeDriveIds.has(drive.id) || !backupRootForDrive(drive)"
+                    :loading="detectingDateDriveId === drive.id"
+                    :disabled="activeDriveIds.has(drive.id) || !backupRootForDrive(drive) || !profiles[drive.id]"
                     :data-testid="`start-${drive.driveLetter}`"
                     @click="requestStart(drive)"
                   >
@@ -545,7 +660,7 @@ async function confirmStart(): Promise<void> {
               <h2 id="operations-heading">
                 작업 Queue
               </h2>
-              <span class="text-caption text-medium-emphasis">오래 걸리더라도 기다려주세요.. 🥹</span>
+              <span class="text-caption text-medium-emphasis">작업은 등록된 순서대로 처리됩니다.</span>
             </div>
           </header>
 
@@ -654,16 +769,16 @@ async function confirmStart(): Promise<void> {
           </p>
           <p class="text-body-2 mt-2">
             백업 위치:
-            <strong>{{ backupRootForDrive(confirmationDrive) }}</strong>
+            <strong>{{ backupDestinationDisplay(confirmationDrive) }}</strong>
           </p>
           <p class="text-body-2">
             시간대:
             <strong>{{ timeSlotLabel(confirmationDrive) }}</strong>
             <span v-if="backupTimeSlots[confirmationDrive.id] === 'day'">
-              {{ createBackupFolderForDrive(confirmationDrive) ? ' · yyyy-mm-dd/1 폴더 사용' : ' · 백업 경로의 1 폴더 사용' }}
+              · 1 폴더 사용
             </span>
             <span v-else-if="backupTimeSlots[confirmationDrive.id] === 'night'">
-              {{ createBackupFolderForDrive(confirmationDrive) ? ' · yyyy-mm-dd/2 폴더 사용' : ' · 백업 경로의 2 폴더 사용' }}
+              · 2 폴더 사용
             </span>
             <span v-else> · 별도 시간대 폴더 없음</span>
           </p>
@@ -672,7 +787,12 @@ async function confirmStart(): Promise<void> {
             <strong>{{ formatVolumeLabelForDrive(confirmationDrive) || confirmationDrive.volumeLabel || '이름 없음' }}</strong>
           </p>
           <p class="text-body-2">
-            {{ createBackupFolderForDrive(confirmationDrive) ? '날짜별 폴더: yyyy-mm-dd' : '날짜별 폴더: 생성 안 함' }}
+            상위 폴더:
+            <strong v-if="createBackupFolderForDrive(confirmationDrive)">{{ backupDateForDrive(confirmationDrive) }}</strong>
+            <strong v-else>생성 안 함</strong>
+            <span v-if="backupDateModeForDrive(confirmationDrive) === 'auto' && detectedBackupDates[confirmationDrive.id]">
+              · 첫 영상 {{ fileNameFromRelativePath(detectedBackupDates[confirmationDrive.id]!.sourceFile) }}에서 감지
+            </span>
           </p>
           <p class="text-caption text-medium-emphasis mt-2">
             메모는 목록과 작업 기록에만 사용됩니다. SD 카드의 볼륨 이름, 파일, 포맷 설정은 변경하지 않습니다.
@@ -691,6 +811,73 @@ async function confirmStart(): Promise<void> {
             @click="confirmStart"
           >
             백업 및 포맷 시작
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog :model-value="Boolean(presetSaveDrive)" max-width="440">
+      <v-card rounded="sm">
+        <v-card-title class="text-subtitle-1 font-weight-bold">
+          설정 값 저장
+        </v-card-title>
+        <v-card-text>
+          <v-text-field
+            v-model="presetName"
+            label="설정 이름"
+            maxlength="80"
+            autofocus
+            hide-details="auto"
+            data-testid="preset-name"
+            @keydown.enter="confirmPresetSave"
+          ></v-text-field>
+          <p class="text-caption text-medium-emphasis mt-2">
+            같은 이름이 있으면 현재 값으로 덮어씁니다. 직접 선택한 날짜와 개별 파일 목록은 저장하지 않습니다.
+          </p>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn @click="closePresetSave">
+            취소
+          </v-btn>
+          <v-btn color="primary" :disabled="!presetName.trim()" data-testid="confirm-save-preset" @click="confirmPresetSave">
+            저장
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog :model-value="Boolean(presetLoadDrive)" max-width="620">
+      <v-card rounded="sm">
+        <v-card-title class="text-subtitle-1 font-weight-bold">
+          설정 불러오기
+        </v-card-title>
+        <v-divider></v-divider>
+        <div v-if="settings.savedCardPresets.length === 0" class="preset-empty text-body-2 text-medium-emphasis">
+          저장된 설정이 없습니다.
+        </div>
+        <v-list v-else density="compact" class="preset-list">
+          <v-list-item v-for="preset in settings.savedCardPresets" :key="preset.id">
+            <v-list-item-title>{{ preset.name }}</v-list-item-title>
+            <v-list-item-subtitle>{{ presetSummary(preset) }}</v-list-item-subtitle>
+            <template #append>
+              <v-btn size="small" variant="text" color="primary" @click="applyPreset(preset)">
+                적용
+              </v-btn>
+              <v-btn
+                size="x-small"
+                variant="text"
+                icon="mdi-delete-outline"
+                :aria-label="`${preset.name} 설정 삭제`"
+                @click.stop="removeCardPreset(preset.id)"
+              ></v-btn>
+            </template>
+          </v-list-item>
+        </v-list>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn @click="closePresetLoad">
+            닫기
           </v-btn>
         </v-card-actions>
       </v-card>

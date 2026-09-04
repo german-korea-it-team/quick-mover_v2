@@ -1,29 +1,39 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import type {
   AppSettings,
+  BackupDateMode,
   BackupFileFilter,
   BackupFolderSelection,
   BackupSelection,
   BackupTimeSlot,
+  DetectedBackupDate,
   DeviceProfile,
   OperationError,
   ProcessSdCardRequest,
   RemovableDrive,
+  SavedCardPreset,
   SdCardSettings,
   SdOperation
 } from '../../../shared/types'
+import { isValidBackupDate } from '../../../shared/backup-date'
 import { normalizeVolumeLabel } from '../../../shared/volume-label'
+
+export type BackupFolderMode = 'none' | BackupDateMode
 
 export function useSdManager() {
   const drives = ref<RemovableDrive[]>([])
   const operations = ref<SdOperation[]>([])
-  const profiles = reactive<Record<string, DeviceProfile>>({})
+  const profiles = reactive<Record<string, DeviceProfile | undefined>>({})
   const backupTimeSlots = reactive<Record<string, BackupTimeSlot>>({})
   const backupSelections = reactive<Record<string, BackupSelection | undefined>>({})
+  const manualBackupDates = reactive<Record<string, string>>({})
+  const detectedBackupDates = reactive<Record<string, DetectedBackupDate | undefined>>({})
+  const detectingDateDriveId = ref<string>()
   const settings = reactive<AppSettings>({
     backupFavoritePaths: [],
     verificationMode: 'fast',
-    cardSettings: {}
+    cardSettings: {},
+    savedCardPresets: []
   })
   const loadingDrives = ref(false)
   const error = ref<OperationError>()
@@ -43,16 +53,13 @@ export function useSdManager() {
     for (const drive of nextDrives) {
       const cardSettings = (settings.cardSettings[drive.physicalDiskIdentifier] ??= {})
       if (!existingDriveIds.has(drive.id)) {
-        const filesystem = drive.filesystem?.toUpperCase()
-        if (filesystem === 'FAT32') profiles[drive.id] = 'gps'
-        else if (filesystem === 'EXFAT') profiles[drive.id] = 'blackbox'
-        else profiles[drive.id] ??= 'blackbox'
-        backupTimeSlots[drive.id] = 'single'
-        delete cardSettings.displayName
-        delete cardSettings.formatVolumeLabel
+        profiles[drive.id] = cardSettings.profile
+        backupTimeSlots[drive.id] = cardSettings.backupTimeSlot ?? 'single'
+        delete manualBackupDates[drive.id]
+        delete detectedBackupDates[drive.id]
       } else {
-        profiles[drive.id] ??= 'blackbox'
-        backupTimeSlots[drive.id] ??= 'single'
+        profiles[drive.id] ??= cardSettings.profile
+        backupTimeSlots[drive.id] ??= cardSettings.backupTimeSlot ?? 'single'
       }
     }
   }
@@ -69,6 +76,21 @@ export function useSdManager() {
     return cardSettingsForDrive(drive).createBackupFolder ?? true
   }
 
+  function backupDateModeForDrive(drive: RemovableDrive): BackupDateMode {
+    return cardSettingsForDrive(drive).backupDateMode ?? 'auto'
+  }
+
+  function backupFolderModeForDrive(drive: RemovableDrive): BackupFolderMode {
+    return createBackupFolderForDrive(drive) ? backupDateModeForDrive(drive) : 'none'
+  }
+
+  function backupDateForDrive(drive: RemovableDrive): string | undefined {
+    if (!createBackupFolderForDrive(drive)) return undefined
+    return backupDateModeForDrive(drive) === 'manual'
+      ? manualBackupDates[drive.id]
+      : detectedBackupDates[drive.id]?.date
+  }
+
   function displayNameForDrive(drive: RemovableDrive): string {
     return cardSettingsForDrive(drive).displayName || ''
   }
@@ -76,6 +98,22 @@ export function useSdManager() {
   function formatVolumeLabelForDrive(drive: RemovableDrive): string | undefined {
     const label = normalizeVolumeLabel(cardSettingsForDrive(drive).formatVolumeLabel ?? '')
     return label || undefined
+  }
+
+  function cloneFolderSelection(selection: BackupFolderSelection): BackupFolderSelection {
+    return {
+      kind: 'folder',
+      relativePath: selection.relativePath,
+      fileFilter: selection.fileFilter,
+      includeSourceFolder: selection.includeSourceFolder
+    }
+  }
+
+  function clonePreset(preset: SavedCardPreset): SavedCardPreset {
+    return {
+      ...preset,
+      ...(preset.backupSelection ? { backupSelection: cloneFolderSelection(preset.backupSelection) } : {})
+    }
   }
 
   function settingsSnapshot(): AppSettings {
@@ -86,11 +124,17 @@ export function useSdManager() {
         Object.entries(settings.cardSettings).map(([physicalDiskIdentifier, cardSettings]) => [
           physicalDiskIdentifier,
           {
+            ...(cardSettings.displayName !== undefined ? { displayName: cardSettings.displayName } : {}),
+            ...(cardSettings.formatVolumeLabel !== undefined ? { formatVolumeLabel: cardSettings.formatVolumeLabel } : {}),
             ...(cardSettings.backupRoot !== undefined ? { backupRoot: cardSettings.backupRoot } : {}),
-            createBackupFolder: cardSettings.createBackupFolder ?? true
+            createBackupFolder: cardSettings.createBackupFolder ?? true,
+            backupDateMode: cardSettings.backupDateMode ?? 'auto',
+            ...(cardSettings.profile ? { profile: cardSettings.profile } : {}),
+            backupTimeSlot: cardSettings.backupTimeSlot ?? 'single'
           }
         ])
-      )
+      ),
+      savedCardPresets: settings.savedCardPresets.map(clonePreset)
     }
   }
 
@@ -138,9 +182,31 @@ export function useSdManager() {
     await saveSettings()
   }
 
-  async function setCreateBackupFolderForDrive(drive: RemovableDrive, value: unknown): Promise<void> {
-    if (typeof value !== 'boolean') return
-    cardSettingsForDrive(drive).createBackupFolder = value
+  async function setBackupFolderModeForDrive(drive: RemovableDrive, value: unknown): Promise<void> {
+    if (value !== 'none' && value !== 'auto' && value !== 'manual') return
+    const cardSettings = cardSettingsForDrive(drive)
+    cardSettings.createBackupFolder = value !== 'none'
+    if (value !== 'none') cardSettings.backupDateMode = value
+    delete detectedBackupDates[drive.id]
+    if (value !== 'manual') delete manualBackupDates[drive.id]
+    await saveSettings()
+  }
+
+  function setManualBackupDateForDrive(drive: RemovableDrive, value: unknown): void {
+    manualBackupDates[drive.id] = typeof value === 'string' ? value : ''
+  }
+
+  async function setProfileForDrive(drive: RemovableDrive, value: unknown): Promise<void> {
+    if (value !== 'blackbox' && value !== 'gps') return
+    profiles[drive.id] = value
+    cardSettingsForDrive(drive).profile = value
+    await saveSettings()
+  }
+
+  async function setBackupTimeSlotForDrive(drive: RemovableDrive, value: unknown): Promise<void> {
+    if (value !== 'single' && value !== 'day' && value !== 'night') return
+    backupTimeSlots[drive.id] = value
+    cardSettingsForDrive(drive).backupTimeSlot = value
     await saveSettings()
   }
 
@@ -150,6 +216,7 @@ export function useSdManager() {
       const relativePath = await window.sdManager.chooseSourceFolder(drive.id)
       if (!relativePath) return
       backupSelections[drive.id] = { kind: 'folder', relativePath, fileFilter: 'all', includeSourceFolder: false }
+      delete detectedBackupDates[drive.id]
     } catch {
       error.value = { code: 'INVALID_REQUEST', message: '선택한 폴더를 이 SD 카드의 백업 대상으로 사용할 수 없습니다.' }
     }
@@ -161,6 +228,7 @@ export function useSdManager() {
       const relativePaths = await window.sdManager.chooseSourceFiles(drive.id)
       if (!relativePaths?.length) return
       backupSelections[drive.id] = { kind: 'files', relativePaths }
+      delete detectedBackupDates[drive.id]
     } catch {
       error.value = { code: 'INVALID_REQUEST', message: '선택한 파일을 이 SD 카드의 백업 대상으로 사용할 수 없습니다.' }
     }
@@ -168,6 +236,7 @@ export function useSdManager() {
 
   function clearBackupSelection(drive: RemovableDrive): void {
     delete backupSelections[drive.id]
+    delete detectedBackupDates[drive.id]
   }
 
   function folderSelectionForDrive(drive: RemovableDrive): BackupFolderSelection | undefined {
@@ -181,7 +250,10 @@ export function useSdManager() {
 
   function setFolderFileFilterForDrive(drive: RemovableDrive, value: unknown): void {
     const selection = folderSelectionForDrive(drive)
-    if (selection && (value === 'all' || value === 'mp4')) selection.fileFilter = value
+    if (selection && (value === 'all' || value === 'mp4')) {
+      selection.fileFilter = value
+      delete detectedBackupDates[drive.id]
+    }
   }
 
   function includesSourceFolderForDrive(drive: RemovableDrive): boolean {
@@ -193,7 +265,64 @@ export function useSdManager() {
     if (selection && typeof value === 'boolean') selection.includeSourceFolder = value
   }
 
+  async function saveCardPreset(drive: RemovableDrive, name: string): Promise<boolean> {
+    const profile = profiles[drive.id]
+    const normalizedName = name.trim()
+    if (!normalizedName || normalizedName.length > 80) {
+      error.value = { code: 'INVALID_REQUEST', message: '저장 설정 이름을 1~80자로 입력하세요.' }
+      return false
+    }
+    if (!profile || !backupRootForDrive(drive)) {
+      error.value = { code: 'INVALID_REQUEST', message: '카드 종류와 백업 경로를 설정한 후 저장하세요.' }
+      return false
+    }
+    const existingIndex = settings.savedCardPresets.findIndex(
+      (preset) => preset.name.toLowerCase() === normalizedName.toLowerCase()
+    )
+    const folderSelection = folderSelectionForDrive(drive)
+    const preset: SavedCardPreset = {
+      id: existingIndex >= 0 ? settings.savedCardPresets[existingIndex]!.id : crypto.randomUUID(),
+      name: normalizedName,
+      ...(displayNameForDrive(drive) ? { displayName: displayNameForDrive(drive) } : {}),
+      ...(formatVolumeLabelForDrive(drive) ? { formatVolumeLabel: formatVolumeLabelForDrive(drive) } : {}),
+      profile,
+      backupRoot: backupRootForDrive(drive),
+      createBackupFolder: createBackupFolderForDrive(drive),
+      backupDateMode: backupDateModeForDrive(drive),
+      backupTimeSlot: backupTimeSlots[drive.id] ?? 'single',
+      ...(folderSelection ? { backupSelection: cloneFolderSelection(folderSelection) } : {})
+    }
+    if (existingIndex >= 0) settings.savedCardPresets[existingIndex] = preset
+    else settings.savedCardPresets.push(preset)
+    await saveSettings()
+    return !error.value
+  }
+
+  async function loadCardPreset(drive: RemovableDrive, preset: SavedCardPreset): Promise<void> {
+    const cardSettings = cardSettingsForDrive(drive)
+    cardSettings.displayName = preset.displayName
+    cardSettings.formatVolumeLabel = preset.formatVolumeLabel
+    cardSettings.backupRoot = preset.backupRoot
+    cardSettings.createBackupFolder = preset.createBackupFolder
+    cardSettings.backupDateMode = preset.backupDateMode
+    cardSettings.profile = preset.profile
+    cardSettings.backupTimeSlot = preset.backupTimeSlot
+    profiles[drive.id] = preset.profile
+    backupTimeSlots[drive.id] = preset.backupTimeSlot
+    if (preset.backupSelection) backupSelections[drive.id] = cloneFolderSelection(preset.backupSelection)
+    else delete backupSelections[drive.id]
+    delete manualBackupDates[drive.id]
+    delete detectedBackupDates[drive.id]
+    await saveSettings()
+  }
+
+  async function removeCardPreset(presetId: string): Promise<void> {
+    settings.savedCardPresets = settings.savedCardPresets.filter((preset) => preset.id !== presetId)
+    await saveSettings()
+  }
+
   async function saveSettings(): Promise<void> {
+    error.value = undefined
     try {
       await window.sdManager.saveSettings(settingsSnapshot())
     } catch {
@@ -201,26 +330,62 @@ export function useSdManager() {
     }
   }
 
+  async function prepareStart(drive: RemovableDrive): Promise<boolean> {
+    error.value = undefined
+    if (!profiles[drive.id]) {
+      error.value = { code: 'INVALID_REQUEST', message: '카드 종류를 선택하세요.' }
+      return false
+    }
+    if (!createBackupFolderForDrive(drive)) return true
+    if (backupDateModeForDrive(drive) === 'manual') {
+      if (!isValidBackupDate(manualBackupDates[drive.id] ?? '')) {
+        error.value = { code: 'INVALID_REQUEST', message: '상위 폴더에 사용할 날짜를 직접 선택하세요.' }
+        return false
+      }
+      return true
+    }
+    detectingDateDriveId.value = drive.id
+    try {
+      const result = await window.sdManager.detectBackupDate({
+        driveId: drive.id,
+        ...(backupSelections[drive.id] ? { backupSelection: backupSelections[drive.id] } : {})
+      })
+      if (!result.success || !result.detected) {
+        error.value = result.error ?? { code: 'BACKUP_FAILED', message: '첫 번째 영상 파일에서 날짜를 확인하지 못했습니다.' }
+        return false
+      }
+      detectedBackupDates[drive.id] = result.detected
+      return true
+    } catch {
+      error.value = { code: 'INTERNAL_ERROR', message: '첫 번째 영상 파일의 날짜를 확인하지 못했습니다.' }
+      return false
+    } finally {
+      detectingDateDriveId.value = undefined
+    }
+  }
+
   async function start(drive: RemovableDrive, selectiveBackupConfirmed = false): Promise<boolean> {
     error.value = undefined
+    const profile = profiles[drive.id]
+    if (!profile) {
+      error.value = { code: 'INVALID_REQUEST', message: '카드 종류를 선택하세요.' }
+      return false
+    }
     const backupSelection = backupSelections[drive.id]
     const request: ProcessSdCardRequest = {
       driveId: drive.id,
       displayName: displayNameForDrive(drive) || undefined,
       formatVolumeLabel: formatVolumeLabelForDrive(drive),
-      profile: profiles[drive.id] ?? 'blackbox',
+      profile,
       backupTimeSlot: backupTimeSlots[drive.id] ?? 'single',
       backupRoot: backupRootForDrive(drive),
       verificationMode: settings.verificationMode,
       createBackupFolder: createBackupFolderForDrive(drive),
+      backupDateMode: backupDateModeForDrive(drive),
+      backupDate: backupDateForDrive(drive),
       ...(backupSelection?.kind === 'folder'
         ? {
-            backupSelection: {
-              kind: 'folder',
-              relativePath: backupSelection.relativePath,
-              fileFilter: backupSelection.fileFilter,
-              includeSourceFolder: backupSelection.includeSourceFolder
-            },
+            backupSelection: cloneFolderSelection(backupSelection),
             selectiveBackupConfirmed
           }
         : backupSelection?.kind === 'files'
@@ -256,7 +421,10 @@ export function useSdManager() {
       window.sdManager.getSettings(),
       window.sdManager.getOperations()
     ])
-    Object.assign(settings, storedSettings, { cardSettings: storedSettings.cardSettings ?? {} })
+    Object.assign(settings, storedSettings, {
+      cardSettings: storedSettings.cardSettings ?? {},
+      savedCardPresets: storedSettings.savedCardPresets ?? []
+    })
     operations.value = storedOperations
     await refreshDrives()
   })
@@ -272,6 +440,9 @@ export function useSdManager() {
     profiles,
     backupTimeSlots,
     backupSelections,
+    manualBackupDates,
+    detectedBackupDates,
+    detectingDateDriveId,
     settings,
     loadingDrives,
     activeDriveIds,
@@ -282,7 +453,13 @@ export function useSdManager() {
     chooseBackupRootForDrive,
     selectBackupFavoriteForDrive,
     createBackupFolderForDrive,
-    setCreateBackupFolderForDrive,
+    backupDateModeForDrive,
+    backupFolderModeForDrive,
+    backupDateForDrive,
+    setBackupFolderModeForDrive,
+    setManualBackupDateForDrive,
+    setProfileForDrive,
+    setBackupTimeSlotForDrive,
     chooseSourceFolder,
     chooseSourceFiles,
     clearBackupSelection,
@@ -295,7 +472,11 @@ export function useSdManager() {
     setFolderFileFilterForDrive,
     includesSourceFolderForDrive,
     setIncludesSourceFolderForDrive,
+    saveCardPreset,
+    loadCardPreset,
+    removeCardPreset,
     saveSettings,
+    prepareStart,
     start,
     cancel
   }

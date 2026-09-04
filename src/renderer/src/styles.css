@@ -86,7 +86,11 @@ body,
 }
 
 .backup-folder-column {
-  width: 125px;
+  min-width: 190px;
+}
+
+.settings-action-column {
+  min-width: 126px;
 }
 
 .table-header-with-info {
@@ -190,6 +194,29 @@ body,
   align-items: center;
   gap: 2px;
   margin-bottom: 3px;
+}
+
+.backup-date-control {
+  display: grid;
+  min-width: 170px;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.preset-actions {
+  display: grid;
+  min-width: 118px;
+  gap: 1px;
+}
+
+.preset-empty {
+  padding: 28px 20px;
+  text-align: center;
+}
+
+.preset-list {
+  max-height: 420px;
+  overflow-y: auto;
 }
 
 .path-value {

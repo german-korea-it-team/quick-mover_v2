@@ -10,6 +10,8 @@ export interface AuditEvent {
   displayName?: string
   profile?: string
   backupTimeSlot?: string
+  backupDateMode?: string
+  backupDate?: string
   backupDestination?: string
   backupSourceFolder?: string
   backupFileFilter?: string

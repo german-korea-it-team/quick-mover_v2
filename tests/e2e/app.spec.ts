@@ -19,8 +19,12 @@ async function installApiMock(page: Page, drives: RemovableDrive[]): Promise<voi
       backupFavoritePaths: [],
       verificationMode: 'fast' as const,
       cardSettings: Object.fromEntries(
-        initialDrives.map((drive) => [drive.physicalDiskIdentifier, { backupRoot: 'D:\\SD_Backup', createBackupFolder: true }])
-      )
+        initialDrives.map((drive) => [
+          drive.physicalDiskIdentifier,
+          { backupRoot: 'D:\\SD_Backup', createBackupFolder: true, backupDateMode: 'auto' as const, profile: 'blackbox' as const }
+        ])
+      ),
+      savedCardPresets: []
     }
 
     Object.defineProperty(window, 'sdManager', {
@@ -29,6 +33,10 @@ async function installApiMock(page: Page, drives: RemovableDrive[]): Promise<voi
         chooseBackupRoot: async () => 'D:\\Selected_Backup',
         chooseSourceFolder: async () => 'Driving',
         chooseSourceFiles: async () => ['Driving/front.mp4', 'Driving/rear.mp4'],
+        detectBackupDate: async () => ({
+          success: true,
+          detected: { date: '2026-09-01', sourceFile: 'Driving/(2026-09-01) front.mp4' }
+        }),
         getSettings: async () => settings,
         saveSettings: async (next: typeof settings) => Object.assign(settings, structuredClone(next)),
         getOperations: async () => operations,
@@ -202,7 +210,8 @@ test('작업 중 SD 카드가 제거되면 목록에서 제거한다', async ({ 
 test('날짜별 백업 폴더 생성 여부를 설정한다', async ({ page }) => {
   await installApiMock(page, [createMockDrive()])
   await page.goto(appUrl)
-  await page.getByTestId('create-backup-folder-E:').getByRole('checkbox').click()
+  await page.getByTestId('backup-folder-mode-E:').click()
+  await page.getByRole('option', { name: '생성 안 함' }).click()
 })
 
 test('카드별 백업 경로와 앱 전용 표시 이름을 설정한다', async ({ page }) => {

@@ -4,6 +4,7 @@ export const IPC_CHANNELS = {
   backupChooseRoot: 'backup:choose-root',
   backupChooseSourceFolder: 'backup:choose-source-folder',
   backupChooseSourceFiles: 'backup:choose-source-files',
+  backupDetectDate: 'backup:detect-date',
   settingsGet: 'settings:get',
   settingsSave: 'settings:save',
   operationStart: 'operation:start',

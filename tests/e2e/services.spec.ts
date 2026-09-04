@@ -75,7 +75,9 @@ function request(driveId: string, backupRoot: string, profile: 'blackbox' | 'gps
     profile,
     backupTimeSlot: 'single',
     verificationMode: 'fast',
-    createBackupFolder: true
+    createBackupFolder: true,
+    backupDateMode: 'manual',
+    backupDate: '2026-09-01'
   }
 }
 

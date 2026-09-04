@@ -5,15 +5,18 @@ import { constants } from 'node:fs'
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import type {
+  BackupDateMode,
   BackupFileFilter,
   BackupSelection,
   BackupTimeSlot,
+  DetectedBackupDate,
   OperationProgress,
   RemovableDrive,
   VerificationMode
 } from '../../shared/types'
 import { PROGRESS_EVENT_INTERVAL_MS } from '../../shared/constants'
 import { SdManagerError } from './errors'
+import { extractBackupDateFromFileName, isValidBackupDate } from '../../shared/backup-date'
 
 interface SourceFile {
   sourceRelativePath: string
@@ -23,12 +26,15 @@ interface SourceFile {
 }
 
 const WINDOWS_VOLUME_METADATA_DIRECTORY = 'system volume information'
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.avi', '.mov', '.mkv', '.mts', '.m2ts', '.ts', '.asf', '.wmv'])
 
-function backupDestinationRoot(backupRoot: string, createBackupFolder: boolean, timeSlot: BackupTimeSlot): string {
-  const now = new Date()
-  const digits = (value: number): string => value.toString().padStart(2, '0')
-  const dateFolder = `${now.getFullYear()}-${digits(now.getMonth() + 1)}-${digits(now.getDate())}`
-  const parent = createBackupFolder ? join(backupRoot, dateFolder) : backupRoot
+function backupDestinationRoot(
+  backupRoot: string,
+  createBackupFolder: boolean,
+  timeSlot: BackupTimeSlot,
+  backupDate: string | undefined
+): string {
+  const parent = createBackupFolder && backupDate ? join(backupRoot, backupDate) : backupRoot
   if (timeSlot === 'day') return join(parent, '1')
   if (timeSlot === 'night') return join(parent, '2')
   return parent
@@ -209,6 +215,65 @@ async function collectSelectedFiles(cardRoot: string, relativePaths: string[]): 
   return files
 }
 
+async function collectBackupSource(
+  drive: RemovableDrive,
+  backupSelection: BackupSelection | undefined,
+  signal: AbortSignal
+): Promise<{ files: SourceFile[]; selection?: BackupSelection }> {
+  try {
+    const cardRoot = await realpath(drive.mountPath)
+    if (!backupSelection) {
+      return { files: await collectFiles(cardRoot, cardRoot, 'all', signal) }
+    }
+    if (backupSelection.kind === 'folder') {
+      const selectedSource = await resolveSourceFolderFromRoot(cardRoot, backupSelection.relativePath)
+      const selection: BackupSelection = {
+        kind: 'folder',
+        relativePath: selectedSource.relativePath,
+        fileFilter: backupSelection.fileFilter,
+        includeSourceFolder: backupSelection.includeSourceFolder
+      }
+      let files = await collectFiles(cardRoot, selectedSource.root, backupSelection.fileFilter, signal)
+      if (!backupSelection.includeSourceFolder) {
+        files = files.map((file) => ({
+          ...file,
+          destinationRelativePath: relative(selectedSource.root, join(cardRoot, file.sourceRelativePath))
+        }))
+      }
+      return { files, selection }
+    }
+    const files = await collectSelectedFiles(cardRoot, backupSelection.relativePaths)
+    return {
+      files,
+      selection: { kind: 'files', relativePaths: files.map((file) => file.sourceRelativePath) }
+    }
+  } catch (error) {
+    if (error instanceof SdManagerError) throw error
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new SdManagerError('DEVICE_REMOVED', '백업 준비 중 SD 카드가 제거되었습니다.')
+    }
+    throw new SdManagerError('BACKUP_FAILED', '백업할 파일 목록을 읽지 못했습니다.', error instanceof Error ? error.message : undefined)
+  }
+}
+
+function detectDateFromFirstVideo(files: SourceFile[]): DetectedBackupDate {
+  const firstVideo = [...files]
+    .sort((left, right) => left.sourceRelativePath.localeCompare(right.sourceRelativePath, 'en', { numeric: true, sensitivity: 'base' }))
+    .find((file) => VIDEO_EXTENSIONS.has(extname(file.sourceRelativePath).toLowerCase()))
+  if (!firstVideo) {
+    throw new SdManagerError('BACKUP_FAILED', '백업 대상에서 날짜를 확인할 영상 파일을 찾지 못했습니다. 날짜를 직접 선택하세요.')
+  }
+  const date = extractBackupDateFromFileName(basename(firstVideo.sourceRelativePath))
+  if (!date) {
+    throw new SdManagerError(
+      'BACKUP_FAILED',
+      '첫 번째 영상 파일명에서 YYYY-MM-DD 날짜를 찾지 못했습니다. 날짜를 직접 선택하세요.',
+      firstVideo.sourceRelativePath
+    )
+  }
+  return { date, sourceFile: firstVideo.sourceRelativePath }
+}
+
 async function getMetadataIfPresent(targetPath: string) {
   try {
     return await stat(targetPath)
@@ -274,6 +339,11 @@ async function hashFile(filePath: string): Promise<string> {
 }
 
 export class BackupService {
+  async detectBackupDate(drive: RemovableDrive, selection: BackupSelection | undefined): Promise<DetectedBackupDate> {
+    const source = await collectBackupSource(drive, selection, new AbortController().signal)
+    return detectDateFromFirstVideo(source.files)
+  }
+
   async relativeSourceFolder(drive: RemovableDrive, selectedPath: string): Promise<string> {
     return relativeSourceFolderFromPath(drive.mountPath, selectedPath)
   }
@@ -327,13 +397,36 @@ export class BackupService {
     backupRoot: string,
     backupTimeSlot: BackupTimeSlot,
     createBackupFolder: boolean,
+    backupDateMode: BackupDateMode,
+    requestedBackupDate: string | undefined,
     backupSelection: BackupSelection | undefined,
     signal: AbortSignal,
     onProgress: ProgressListener
   ): Promise<BackupResult> {
     this.assertBackupRootOutsideSource(drive.mountPath, backupRoot)
     await this.assertBackupRootAvailable(backupRoot)
-    const destinationRoot = backupDestinationRoot(backupRoot, createBackupFolder, backupTimeSlot)
+    const source = await collectBackupSource(drive, backupSelection, signal)
+    let { files } = source
+    const { selection } = source
+    if (selection && files.length === 0) {
+      throw new SdManagerError('BACKUP_FAILED', '선택한 백업 대상에 조건과 일치하는 파일이 없습니다. SD 카드는 포맷하지 않습니다.')
+    }
+    let backupDate: string | undefined
+    if (createBackupFolder) {
+      if (backupDateMode === 'manual') {
+        if (!requestedBackupDate || !isValidBackupDate(requestedBackupDate)) {
+          throw new SdManagerError('INVALID_REQUEST', '상위 폴더에 사용할 날짜를 직접 선택하세요.')
+        }
+        backupDate = requestedBackupDate
+      } else {
+        const detected = detectDateFromFirstVideo(files)
+        if (requestedBackupDate && requestedBackupDate !== detected.date) {
+          throw new SdManagerError('BACKUP_FAILED', '확인 후 첫 번째 영상 파일의 날짜가 변경되었습니다. 날짜를 다시 확인하세요.')
+        }
+        backupDate = detected.date
+      }
+    }
+    const destinationRoot = backupDestinationRoot(backupRoot, createBackupFolder, backupTimeSlot, backupDate)
     if (destinationRoot !== backupRoot) {
       try {
         await mkdir(destinationRoot, { recursive: true })
@@ -344,44 +437,6 @@ export class BackupService {
           error instanceof Error ? error.message : undefined
         )
       }
-    }
-    let files: SourceFile[]
-    let selection: BackupSelection | undefined
-    try {
-      const cardRoot = await realpath(drive.mountPath)
-      if (!backupSelection) {
-        files = await collectFiles(cardRoot, cardRoot, 'all', signal)
-      } else if (backupSelection.kind === 'folder') {
-        const selectedSource = await resolveSourceFolderFromRoot(cardRoot, backupSelection.relativePath)
-        selection = {
-          kind: 'folder',
-          relativePath: selectedSource.relativePath,
-          fileFilter: backupSelection.fileFilter,
-          includeSourceFolder: backupSelection.includeSourceFolder
-        }
-        files = await collectFiles(cardRoot, selectedSource.root, backupSelection.fileFilter, signal)
-        if (!selection.includeSourceFolder) {
-          files = files.map((file) => ({
-            ...file,
-            destinationRelativePath: relative(selectedSource.root, join(cardRoot, file.sourceRelativePath))
-          }))
-        }
-      } else {
-        files = await collectSelectedFiles(cardRoot, backupSelection.relativePaths)
-        selection = {
-          kind: 'files',
-          relativePaths: files.map((file) => file.sourceRelativePath)
-        }
-      }
-    } catch (error) {
-      if (error instanceof SdManagerError) throw error
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        throw new SdManagerError('DEVICE_REMOVED', '백업 준비 중 SD 카드가 제거되었습니다.')
-      }
-      throw new SdManagerError('BACKUP_FAILED', '백업할 파일 목록을 읽지 못했습니다.', error instanceof Error ? error.message : undefined)
-    }
-    if (selection && files.length === 0) {
-      throw new SdManagerError('BACKUP_FAILED', '선택한 백업 대상에 조건과 일치하는 파일이 없습니다. SD 카드는 포맷하지 않습니다.')
     }
     const totalBytes = files.reduce((sum, file) => sum + file.size, 0)
     const destination = destinationRoot

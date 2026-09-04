@@ -1,11 +1,11 @@
 import { dialog, ipcMain } from 'electron'
-import type { AppSettings, ProcessSdCardRequest } from '../../shared/types'
+import type { AppSettings, DetectBackupDateRequest, ProcessSdCardRequest } from '../../shared/types'
 import { IPC_CHANNELS } from '../../shared/ipc'
 import type { DriveService } from '../services/drive.service'
 import type { OperationService } from '../services/operation.service'
 import type { SettingsService } from '../services/settings.service'
 import type { BackupService } from '../services/backup.service'
-import { SdManagerError } from '../services/errors'
+import { SdManagerError, toOperationError } from '../services/errors'
 
 export interface IpcDependencies {
   driveService: DriveService
@@ -52,6 +52,19 @@ export function registerIpc({ driveService, backupService, operationService, set
     })
     if (result.canceled || result.filePaths.length === 0) return undefined
     return backupService.relativeSourceFiles(drive, result.filePaths)
+  })
+  ipcMain.handle(IPC_CHANNELS.backupDetectDate, async (_event, request: DetectBackupDateRequest) => {
+    try {
+      if (!request || typeof request.driveId !== 'string' || !request.driveId) {
+        throw new SdManagerError('INVALID_REQUEST', '날짜를 확인할 SD 카드를 지정하세요.')
+      }
+      const drive = await driveService.inspectDrive(request.driveId)
+      driveService.assertSafeRemovableDrive(drive)
+      await backupService.assertBackupSelectionAvailable(drive, request.backupSelection)
+      return { success: true, detected: await backupService.detectBackupDate(drive, request.backupSelection) }
+    } catch (error) {
+      return { success: false, error: toOperationError(error) }
+    }
   })
   ipcMain.handle(IPC_CHANNELS.settingsGet, () => settingsService.get())
   ipcMain.handle(IPC_CHANNELS.settingsSave, (_event, settings: AppSettings) => settingsService.save(settings))

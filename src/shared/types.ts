@@ -6,6 +6,8 @@ export type BackupFileFilter = 'all' | 'mp4'
 
 export type BackupTimeSlot = 'single' | 'day' | 'night'
 
+export type BackupDateMode = 'auto' | 'manual'
+
 export interface BackupFolderSelection {
   kind: 'folder'
   relativePath: string
@@ -114,8 +116,26 @@ export interface ProcessSdCardRequest {
   backupRoot: string
   verificationMode: VerificationMode
   createBackupFolder: boolean
+  backupDateMode: BackupDateMode
+  backupDate?: string
   backupSelection?: BackupSelection
   selectiveBackupConfirmed?: boolean
+}
+
+export interface DetectBackupDateRequest {
+  driveId: string
+  backupSelection?: BackupSelection
+}
+
+export interface DetectedBackupDate {
+  date: string
+  sourceFile: string
+}
+
+export interface DetectBackupDateResult {
+  success: boolean
+  detected?: DetectedBackupDate
+  error?: OperationError
 }
 
 export interface SdCardSettings {
@@ -127,6 +147,23 @@ export interface SdCardSettings {
   backupRoot?: string
   /** 날짜 형식(yyyy-mm-dd)의 백업 폴더를 생성할지 여부입니다. */
   createBackupFolder?: boolean
+  /** 상위 폴더 날짜를 영상 파일명에서 감지할지 직접 입력할지 결정합니다. */
+  backupDateMode?: BackupDateMode
+  profile?: DeviceProfile
+  backupTimeSlot?: BackupTimeSlot
+}
+
+export interface SavedCardPreset {
+  id: string
+  name: string
+  displayName?: string
+  formatVolumeLabel?: string
+  profile: DeviceProfile
+  backupRoot: string
+  createBackupFolder: boolean
+  backupDateMode: BackupDateMode
+  backupTimeSlot: BackupTimeSlot
+  backupSelection?: BackupFolderSelection
 }
 
 export interface ProcessSdCardResult {
@@ -144,6 +181,7 @@ export interface AppSettings {
   backupFavoritePaths: string[]
   verificationMode: VerificationMode
   cardSettings: Record<string, SdCardSettings>
+  savedCardPresets: SavedCardPreset[]
 }
 
 export interface FormatOptions {
@@ -162,6 +200,7 @@ export interface SdManagerApi {
   chooseBackupRoot(defaultPath?: string): Promise<string | undefined>
   chooseSourceFolder(driveId: string): Promise<string | undefined>
   chooseSourceFiles(driveId: string): Promise<string[] | undefined>
+  detectBackupDate(request: DetectBackupDateRequest): Promise<DetectBackupDateResult>
   getSettings(): Promise<AppSettings>
   saveSettings(settings: AppSettings): Promise<void>
   startProcess(request: ProcessSdCardRequest): Promise<ProcessSdCardResult>
