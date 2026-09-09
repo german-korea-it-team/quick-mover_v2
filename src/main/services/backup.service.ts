@@ -27,6 +27,7 @@ interface SourceFile {
 
 const WINDOWS_VOLUME_METADATA_DIRECTORY = 'system volume information'
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.avi', '.mov', '.mkv', '.mts', '.m2ts', '.ts', '.asf', '.wmv'])
+const BLACKBOX_VIDEO_NAME_PATTERN = /^(?:19|20)\d{2}-\d{2}-\d{2}-\d{2}h-\d{2}m-\d{2}s_.+$/i
 
 function backupDestinationRoot(
   backupRoot: string,
@@ -259,7 +260,10 @@ async function collectBackupSource(
 function detectDateFromFirstVideo(files: SourceFile[]): DetectedBackupDate {
   const firstVideo = [...files]
     .sort((left, right) => left.sourceRelativePath.localeCompare(right.sourceRelativePath, 'en', { numeric: true, sensitivity: 'base' }))
-    .find((file) => VIDEO_EXTENSIONS.has(extname(file.sourceRelativePath).toLowerCase()))
+    .find((file) => {
+      const fileName = basename(file.sourceRelativePath)
+      return VIDEO_EXTENSIONS.has(extname(fileName).toLowerCase()) || BLACKBOX_VIDEO_NAME_PATTERN.test(fileName)
+    })
   if (!firstVideo) {
     throw new SdManagerError('BACKUP_FAILED', '백업 대상에서 날짜를 확인할 영상 파일을 찾지 못했습니다. 날짜를 직접 선택하세요.')
   }

@@ -10,7 +10,7 @@ export default defineConfig({
   webServer: process.env.QUICK_MOVER_FILE_TEST
     ? undefined
     : {
-        command: './node_modules/.bin/vite --config tests/vite.config.ts',
+        command: 'pnpm exec vite --config tests/vite.config.ts',
         url: 'http://127.0.0.1:4173',
         reuseExistingServer: !process.env.CI
       }

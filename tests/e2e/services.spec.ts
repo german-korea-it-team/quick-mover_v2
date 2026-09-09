@@ -439,6 +439,35 @@ test('백업 준비 중 장치가 제거되면 DEVICE_REMOVED로 실패하고 �
   }
 })
 
+test('선택 폴더의 첫 확장자 없는 영상 파일명에서 백업 날짜를 감지한다', async () => {
+  const harness = await createHarness()
+  try {
+    const drivingFolder = join(harness.source, 'Driving')
+    const videoName = '2026-09-01-16h-06m-40s_R_normal'
+    await mkdir(drivingFolder)
+    await writeFile(join(drivingFolder, videoName), 'blackbox video')
+    const autoDateRequest = request(harness.drive.id, harness.backupRoot, 'gps')
+    autoDateRequest.backupDateMode = 'auto'
+    delete autoDateRequest.backupDate
+    autoDateRequest.backupSelection = {
+      kind: 'folder',
+      relativePath: 'Driving',
+      fileFilter: 'all',
+      includeSourceFolder: false
+    }
+    autoDateRequest.selectiveBackupConfirmed = true
+
+    await harness.operationService.start(autoDateRequest)
+    await waitForTerminal(harness.changes, 1)
+
+    expect(harness.changes[0]?.state).toBe('completed')
+    expect(harness.changes[0]?.backupDestination).toBe(join(harness.backupRoot, '2026-09-01'))
+    expect(await readFile(join(harness.backupRoot, '2026-09-01', videoName), 'utf8')).toBe('blackbox video')
+  } finally {
+    await rm(harness.root, { recursive: true, force: true })
+  }
+})
+
 test('백업 폴더 생성 시 yyyy-mm-dd 폴더 하나만 만든다', async () => {
   const harness = await createHarness()
   try {

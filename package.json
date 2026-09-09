@@ -1,6 +1,6 @@
 {
   "name": "quick-mover",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Windows utility for safely backing up and formatting multiple SD cards",
   "main": "out/main/index.js",

@@ -33,10 +33,13 @@ async function installApiMock(page: Page, drives: RemovableDrive[]): Promise<voi
         chooseBackupRoot: async () => 'D:\\Selected_Backup',
         chooseSourceFolder: async () => 'Driving',
         chooseSourceFiles: async () => ['Driving/front.mp4', 'Driving/rear.mp4'],
-        detectBackupDate: async () => ({
-          success: true,
-          detected: { date: '2026-09-01', sourceFile: 'Driving/(2026-09-01) front.mp4' }
-        }),
+        detectBackupDate: async (request: unknown) => {
+          structuredClone(request)
+          return {
+            success: true,
+            detected: { date: '2026-09-01', sourceFile: 'Driving/(2026-09-01) front.mp4' }
+          }
+        },
         getSettings: async () => settings,
         saveSettings: async (next: typeof settings) => Object.assign(settings, structuredClone(next)),
         getOperations: async () => operations,

@@ -109,6 +109,11 @@ export function useSdManager() {
     }
   }
 
+  function cloneBackupSelection(selection: BackupSelection): BackupSelection {
+    if (selection.kind === 'folder') return cloneFolderSelection(selection)
+    return { kind: 'files', relativePaths: [...selection.relativePaths] }
+  }
+
   function clonePreset(preset: SavedCardPreset): SavedCardPreset {
     return {
       ...preset,
@@ -346,9 +351,10 @@ export function useSdManager() {
     }
     detectingDateDriveId.value = drive.id
     try {
+      const backupSelection = backupSelections[drive.id]
       const result = await window.sdManager.detectBackupDate({
         driveId: drive.id,
-        ...(backupSelections[drive.id] ? { backupSelection: backupSelections[drive.id] } : {})
+        ...(backupSelection ? { backupSelection: cloneBackupSelection(backupSelection) } : {})
       })
       if (!result.success || !result.detected) {
         error.value = result.error ?? { code: 'BACKUP_FAILED', message: '첫 번째 영상 파일에서 날짜를 확인하지 못했습니다.' }
@@ -357,7 +363,7 @@ export function useSdManager() {
       detectedBackupDates[drive.id] = result.detected
       return true
     } catch {
-      error.value = { code: 'INTERNAL_ERROR', message: '첫 번째 영상 파일의 날짜를 확인하지 못했습니다.' }
+      error.value = { code: 'INTERNAL_ERROR', message: '(내부 오류)첫 번째 영상 파일의 날짜를 확인하지 못했습니다.' }
       return false
     } finally {
       detectingDateDriveId.value = undefined
@@ -383,20 +389,12 @@ export function useSdManager() {
       createBackupFolder: createBackupFolderForDrive(drive),
       backupDateMode: backupDateModeForDrive(drive),
       backupDate: backupDateForDrive(drive),
-      ...(backupSelection?.kind === 'folder'
+      ...(backupSelection
         ? {
-            backupSelection: cloneFolderSelection(backupSelection),
+            backupSelection: cloneBackupSelection(backupSelection),
             selectiveBackupConfirmed
           }
-        : backupSelection?.kind === 'files'
-          ? {
-              backupSelection: {
-                kind: 'files',
-                relativePaths: [...backupSelection.relativePaths]
-              },
-              selectiveBackupConfirmed
-            }
-          : {})
+        : {})
     }
     const result = await window.sdManager.startProcess(request)
     if (!result.success) {
