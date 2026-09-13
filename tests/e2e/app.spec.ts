@@ -8,6 +8,28 @@ const appUrl = process.env.QUICK_MOVER_FILE_TEST
   ? pathToFileURL(resolve('out/renderer/index.html')).href
   : '/'
 
+for (const picker of ['choose-drive-backup', 'choose-source', 'choose-source-files']) {
+  for (const modal of ['load-settings', 'save-settings']) {
+    test(`${picker} 선택 후 ${modal} 모달을 닫고 다시 연다`, async ({ page }) => {
+      await installApiMock(page, [createMockDrive()])
+      await page.goto(appUrl)
+      await page.getByTestId(`${picker}-E:`).click()
+      const opener = page.getByTestId(`${modal}-E:`)
+      const dialog = page.getByRole('dialog')
+      await opener.click()
+      await expect(dialog).toBeVisible()
+      await page.keyboard.press('Escape')
+      await expect(dialog).toBeHidden()
+      await opener.click()
+      await expect(dialog).toBeVisible()
+      await page.locator('.v-overlay__scrim').click({ position: { x: 5, y: 5 } })
+      await expect(dialog).toBeHidden()
+      await opener.click()
+      await expect(dialog).toBeVisible()
+    })
+  }
+}
+
 async function installApiMock(page: Page, drives: RemovableDrive[]): Promise<void> {
   await page.addInitScript((initialDrives) => {
     let currentDrives = initialDrives

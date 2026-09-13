@@ -1,4 +1,4 @@
-import { dialog, ipcMain } from 'electron'
+import { BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type OpenDialogOptions, type OpenDialogReturnValue } from 'electron'
 import type { AppSettings, DetectBackupDateRequest, ProcessSdCardRequest } from '../../shared/types'
 import { IPC_CHANNELS } from '../../shared/ipc'
 import type { DriveService } from '../services/drive.service'
@@ -14,24 +14,32 @@ export interface IpcDependencies {
   settingsService: SettingsService
 }
 
+function showOpenDialogForSender(event: IpcMainInvokeEvent, options: OpenDialogOptions): Promise<OpenDialogReturnValue> {
+  const parent = BrowserWindow.fromWebContents(event.sender)
+  if (!parent || parent.isDestroyed()) {
+    throw new SdManagerError('INVALID_REQUEST', '선택 창을 열 애플리케이션 창을 찾을 수 없습니다.')
+  }
+  return dialog.showOpenDialog(parent, options)
+}
+
 export function registerIpc({ driveService, backupService, operationService, settingsService }: IpcDependencies): void {
   ipcMain.handle(IPC_CHANNELS.driveList, () => driveService.listDrives())
-  ipcMain.handle(IPC_CHANNELS.backupChooseRoot, async (_event, defaultPath?: string) => {
+  ipcMain.handle(IPC_CHANNELS.backupChooseRoot, async (event, defaultPath?: string) => {
     const initialPath = typeof defaultPath === 'string' && defaultPath.trim() ? defaultPath.trim() : undefined
-    const result = await dialog.showOpenDialog({
+    const result = await showOpenDialogForSender(event, {
       ...(initialPath ? { defaultPath: initialPath } : {}),
       properties: ['openDirectory', 'createDirectory'],
       title: '백업 경로 선택'
     })
     return result.canceled ? undefined : result.filePaths[0]
   })
-  ipcMain.handle(IPC_CHANNELS.backupChooseSourceFolder, async (_event, driveId: string) => {
+  ipcMain.handle(IPC_CHANNELS.backupChooseSourceFolder, async (event, driveId: string) => {
     if (typeof driveId !== 'string' || !driveId) {
       throw new SdManagerError('INVALID_REQUEST', '원본 폴더를 선택할 SD 카드를 지정하세요.')
     }
     const drive = await driveService.inspectDrive(driveId)
     driveService.assertSafeRemovableDrive(drive)
-    const result = await dialog.showOpenDialog({
+    const result = await showOpenDialogForSender(event, {
       defaultPath: drive.mountPath,
       properties: ['openDirectory'],
       title: `${drive.driveLetter} 드라이브에서 백업할 폴더 선택`
@@ -39,13 +47,13 @@ export function registerIpc({ driveService, backupService, operationService, set
     if (result.canceled || !result.filePaths[0]) return undefined
     return backupService.relativeSourceFolder(drive, result.filePaths[0])
   })
-  ipcMain.handle(IPC_CHANNELS.backupChooseSourceFiles, async (_event, driveId: string) => {
+  ipcMain.handle(IPC_CHANNELS.backupChooseSourceFiles, async (event, driveId: string) => {
     if (typeof driveId !== 'string' || !driveId) {
       throw new SdManagerError('INVALID_REQUEST', '원본 파일을 선택할 SD 카드를 지정하세요.')
     }
     const drive = await driveService.inspectDrive(driveId)
     driveService.assertSafeRemovableDrive(drive)
-    const result = await dialog.showOpenDialog({
+    const result = await showOpenDialogForSender(event, {
       defaultPath: drive.mountPath,
       properties: ['openFile', 'multiSelections'],
       title: `${drive.driveLetter} 드라이브에서 백업할 파일 선택`

@@ -816,7 +816,7 @@ async function confirmStart(): Promise<void> {
       </v-card>
     </v-dialog>
 
-    <v-dialog :model-value="Boolean(presetSaveDrive)" max-width="440">
+    <v-dialog :model-value="Boolean(presetSaveDrive)" max-width="440" @update:model-value="!$event && closePresetSave()">
       <v-card rounded="sm">
         <v-card-title class="text-subtitle-1 font-weight-bold">
           설정 값 저장
@@ -847,7 +847,7 @@ async function confirmStart(): Promise<void> {
       </v-card>
     </v-dialog>
 
-    <v-dialog :model-value="Boolean(presetLoadDrive)" max-width="620">
+    <v-dialog :model-value="Boolean(presetLoadDrive)" max-width="620" @update:model-value="!$event && closePresetLoad()">
       <v-card rounded="sm">
         <v-card-title class="text-subtitle-1 font-weight-bold">
           설정 불러오기
