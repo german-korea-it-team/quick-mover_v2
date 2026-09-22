@@ -2,8 +2,6 @@ export type DeviceProfile = 'blackbox' | 'gps'
 
 export type VerificationMode = 'fast' | 'full'
 
-export type BackupFileFilter = 'all' | 'mp4'
-
 export type BackupTimeSlot = 'single' | 'day' | 'night'
 
 export type BackupDateMode = 'auto' | 'manual'
@@ -11,7 +9,6 @@ export type BackupDateMode = 'auto' | 'manual'
 export interface BackupFolderSelection {
   kind: 'folder'
   relativePath: string
-  fileFilter: BackupFileFilter
   includeSourceFolder: boolean
 }
 
@@ -30,6 +27,7 @@ export type OperationState =
   | 'backup-preparing'
   | 'backing-up'
   | 'backup-verifying'
+  | 'format-queued'
   | 'formatting'
   | 'format-verifying'
   | 'installing-config'
@@ -110,7 +108,6 @@ export interface SdOperation {
 export interface ProcessSdCardRequest {
   driveId: string
   displayName?: string
-  formatVolumeLabel?: string
   profile: DeviceProfile
   backupTimeSlot: BackupTimeSlot
   backupRoot: string
@@ -141,8 +138,6 @@ export interface DetectBackupDateResult {
 export interface SdCardSettings {
   /** 앱에서만 사용하는 메모입니다. SD 카드의 볼륨 레이블이나 파일에는 적용되지 않습니다. */
   displayName?: string
-  /** 포맷 완료 후 SD 카드에 적용할 볼륨 이름입니다. 비어 있으면 현재 볼륨 이름을 유지합니다. */
-  formatVolumeLabel?: string
   /** 이 물리 SD 카드에 적용하는 백업 경로입니다. */
   backupRoot?: string
   /** 날짜 형식(yyyy-mm-dd)의 백업 폴더를 생성할지 여부입니다. */
@@ -157,7 +152,6 @@ export interface SavedCardPreset {
   id: string
   name: string
   displayName?: string
-  formatVolumeLabel?: string
   profile: DeviceProfile
   backupRoot: string
   createBackupFolder: boolean
@@ -187,7 +181,6 @@ export interface AppSettings {
 export interface FormatOptions {
   filesystem: 'exFAT' | 'FAT32'
   allocationUnitSize?: 131072
-  volumeLabel?: string
 }
 
 export interface FormatResult {

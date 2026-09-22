@@ -14,7 +14,6 @@ export class FormatService {
     selected: RemovableDrive,
     profile: DeviceProfile,
     backupRoot: string,
-    formatVolumeLabel: string | undefined,
     beforeFormat: (current: RemovableDrive, options: FormatOptions) => Promise<void>,
     afterFormat: () => void
   ): Promise<RemovableDrive> {
@@ -23,11 +22,7 @@ export class FormatService {
     this.driveService.assertSameDrive(selected, current)
     await this.driveService.assertBackupDestinationIsDifferentDrive(current, backupRoot)
 
-    const volumeLabel = formatVolumeLabel || current.volumeLabel
-    const options: FormatOptions = {
-      ...FORMAT_OPTIONS[profile],
-      ...(volumeLabel ? { volumeLabel } : {})
-    }
+    const options: FormatOptions = { ...FORMAT_OPTIONS[profile] }
     await beforeFormat(current, options)
     await this.platform.formatDrive(current, options)
     afterFormat()
@@ -39,9 +34,6 @@ export class FormatService {
     }
     if (formatted.filesystem?.toUpperCase() !== options.filesystem.toUpperCase()) {
       throw new SdManagerError('FORMAT_VERIFICATION_FAILED', `포맷 결과가 ${options.filesystem} 파일 시스템이 아닙니다.`)
-    }
-    if (options.volumeLabel && formatted.volumeLabel?.toUpperCase() !== options.volumeLabel.toUpperCase()) {
-      throw new SdManagerError('FORMAT_VERIFICATION_FAILED', '포맷 후 볼륨 이름이 요청한 값과 다릅니다.')
     }
     if (profile === 'blackbox' && formatted.allocationUnitSize !== 131072) {
       throw new SdManagerError('FORMAT_VERIFICATION_FAILED', '블랙박스 SD 카드의 할당 단위가 128 KB가 아닙니다.')

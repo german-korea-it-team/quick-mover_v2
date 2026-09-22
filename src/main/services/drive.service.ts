@@ -43,9 +43,13 @@ export class DriveService {
   }
 
   async assertBackupDestinationIsDifferentDrive(drive: RemovableDrive, backupRoot: string): Promise<void> {
+    await this.assertBackupDestinationOutsideDisks(new Set([drive.physicalDiskIdentifier]), backupRoot)
+  }
+
+  async assertBackupDestinationOutsideDisks(diskIds: ReadonlySet<string>, backupRoot: string): Promise<void> {
     const backupDiskId = await this.platform.getPhysicalDiskIdentifierForPath(backupRoot)
-    if (backupDiskId && backupDiskId === drive.physicalDiskIdentifier) {
-      throw new SdManagerError('BACKUP_DESTINATION_ON_SOURCE', '백업 경로가 SD 카드와 같은 디스크에 있습니다.')
+    if (backupDiskId && diskIds.has(backupDiskId)) {
+      throw new SdManagerError('BACKUP_DESTINATION_ON_SOURCE', '백업 경로가 처리 대상 SD 카드와 같은 디스크에 있습니다.')
     }
   }
 }

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { BACKUP_CONCURRENCY } from '../../shared/constants'
 import type {
   BackupSelection,
   CancelOperationResult,
@@ -12,7 +13,6 @@ import { DriveService } from './drive.service'
 import { SdManagerError, toOperationError } from './errors'
 import { FormatService } from './format.service'
 import { LoggerService } from './logger.service'
-import { normalizeVolumeLabel, validateVolumeLabel } from '../../shared/volume-label'
 import { BlackBoxConfigService } from './black-box-config.service'
 import { isValidBackupDate } from '../../shared/backup-date'
 
@@ -34,7 +34,6 @@ function normalizeBackupSelection(selection: BackupSelection | undefined): Backu
     return {
       kind: 'folder',
       relativePath: selection.relativePath.trim(),
-      fileFilter: selection.fileFilter,
       includeSourceFolder: selection.includeSourceFolder
     }
   }
@@ -50,12 +49,6 @@ function validateRequest(request: ProcessSdCardRequest): void {
   }
   if (request.displayName !== undefined && (typeof request.displayName !== 'string' || request.displayName.length > 80)) {
     throw new SdManagerError('INVALID_REQUEST', '메모가 올바르지 않습니다.')
-  }
-  if (
-    request.formatVolumeLabel !== undefined &&
-    (typeof request.formatVolumeLabel !== 'string' || validateVolumeLabel(request.formatVolumeLabel))
-  ) {
-    throw new SdManagerError('INVALID_REQUEST', '볼륨 이름이 올바르지 않습니다.')
   }
   if (request.profile !== 'blackbox' && request.profile !== 'gps') {
     throw new SdManagerError('INVALID_REQUEST', '올바른 카드 종류를 선택하세요.')
@@ -89,7 +82,6 @@ function validateRequest(request: ProcessSdCardRequest): void {
       if (
         typeof request.backupSelection.relativePath !== 'string' ||
         request.backupSelection.relativePath.trim().length === 0 ||
-        (request.backupSelection.fileFilter !== 'all' && request.backupSelection.fileFilter !== 'mp4') ||
         typeof request.backupSelection.includeSourceFolder !== 'boolean'
       ) {
         throw new SdManagerError('INVALID_REQUEST', '선택한 백업 폴더 범위가 올바르지 않습니다.')
@@ -115,7 +107,11 @@ export class OperationService {
   private readonly operations = new Map<string, SdOperation>()
   private readonly queue: QueueItem[] = []
   private readonly abortControllers = new Map<string, AbortController>()
-  private draining = false
+  private activeBackups = 0
+  private readonly formatQueue: QueueItem[] = []
+  private formatting = false
+  private readonly reservedDisks = new Set<string>()
+  private readonly activeBackupRoots = new Map<string, string>()
 
   constructor(
     private readonly driveService: DriveService,
@@ -131,6 +127,8 @@ export class OperationService {
   }
 
   async start(request: ProcessSdCardRequest): Promise<ProcessSdCardResult> {
+    let reservedDisk: string | undefined
+    let enqueued = false
     try {
       validateRequest(request)
       const existing = [...this.operations.values()].find(
@@ -140,6 +138,15 @@ export class OperationService {
 
       const selectedDrive = await this.driveService.inspectDrive(request.driveId)
       this.driveService.assertSafeRemovableDrive(selectedDrive)
+      if (this.reservedDisks.has(selectedDrive.physicalDiskIdentifier)) {
+        throw new SdManagerError('INVALID_REQUEST', '이 물리 디스크는 이미 처리 대기 중이거나 처리 중입니다.')
+      }
+      reservedDisk = selectedDrive.physicalDiskIdentifier
+      this.reservedDisks.add(reservedDisk)
+      this.activeBackupRoots.set(reservedDisk, request.backupRoot)
+      for (const backupRoot of this.activeBackupRoots.values()) {
+        await this.driveService.assertBackupDestinationOutsideDisks(this.reservedDisks, backupRoot)
+      }
       if (request.profile === 'blackbox') await this.blackBoxConfigService.assertSourceAvailable()
       await this.backupService.assertBackupRootAvailable(request.backupRoot)
       this.backupService.assertBackupRootOutsideSource(selectedDrive.mountPath, request.backupRoot)
@@ -168,7 +175,6 @@ export class OperationService {
         backupDateMode: request.backupDateMode,
         backupDate: request.backupDate,
         backupSourceFolder: request.backupSelection?.kind === 'folder' ? request.backupSelection.relativePath : undefined,
-        backupFileFilter: request.backupSelection?.kind === 'folder' ? request.backupSelection.fileFilter : undefined,
         backupSelectedFileCount: request.backupSelection?.kind === 'files' ? request.backupSelection.relativePaths.length : undefined,
         selectiveBackupConfirmed: request.backupSelection ? true : undefined
       })
@@ -184,16 +190,18 @@ export class OperationService {
                 backupSelection,
                 selectiveBackupConfirmed: true
               }
-            : {}),
-          ...(request.formatVolumeLabel ? { formatVolumeLabel: normalizeVolumeLabel(request.formatVolumeLabel) } : {})
+            : {})
         },
         selectedDrive
       })
+      enqueued = true
       this.publish(operation)
-      void this.drainQueue()
+      this.drainQueue()
       return { success: true, operationId }
     } catch (error) {
       return { success: false, error: toOperationError(error) }
+    } finally {
+      if (!enqueued && reservedDisk) this.releaseDisk(reservedDisk)
     }
   }
 
@@ -204,6 +212,8 @@ export class OperationService {
       return { success: false, error: { code: 'INVALID_REQUEST', message: '현재 단계에서는 안전하게 취소할 수 없습니다.' } }
     }
     if (operation.state === 'queued') {
+      const item = this.queue.find((item) => item.operationId === operationId)
+      if (item) this.releaseDisk(item.selectedDrive.physicalDiskIdentifier)
       operation.state = 'cancelled'
       operation.completedAt = new Date().toISOString()
       this.publish(operation)
@@ -213,22 +223,24 @@ export class OperationService {
     return { success: true }
   }
 
-  private async drainQueue(): Promise<void> {
-    if (this.draining) return
-    this.draining = true
-    try {
-      let item = this.queue.shift()
-      while (item) {
-        const operation = this.operations.get(item.operationId)
-        if (operation?.state !== 'cancelled') await this.runOperation(item)
-        item = this.queue.shift()
-      }
-    } finally {
-      this.draining = false
+  private drainQueue(): void {
+    while (this.activeBackups < BACKUP_CONCURRENCY && this.queue.length > 0) {
+      const item = this.queue.shift()!
+      if (this.operations.get(item.operationId)?.state !== 'queued') continue
+      this.activeBackups += 1
+      void this.runBackupOperation(item)
     }
   }
 
-  private async runOperation(item: QueueItem): Promise<void> {
+  private drainFormatQueue(): void {
+    if (this.formatting) return
+    const item = this.formatQueue.shift()
+    if (!item) return
+    this.formatting = true
+    void this.runFormatOperation(item)
+  }
+
+  private async runBackupOperation(item: QueueItem): Promise<void> {
     const operation = this.operations.get(item.operationId)
     if (!operation) return
     const abortController = new AbortController()
@@ -256,6 +268,7 @@ export class OperationService {
           this.publish(operation)
         }
       )
+      if (abortController.signal.aborted) throw new SdManagerError('BACKUP_CANCELLED', '백업이 취소되었습니다.')
       operation.backupDestination = backup.destination
       await this.logger.write({
         event: 'BACKUP_COMPLETE',
@@ -265,19 +278,38 @@ export class OperationService {
         result: 'success'
       })
 
+      if (abortController.signal.aborted) throw new SdManagerError('BACKUP_CANCELLED', '백업이 취소되었습니다.')
       this.setState(operation, 'backup-verifying')
       const currentBeforeVerification = await this.driveService.inspectDrive(item.selectedDrive.id)
       this.driveService.assertSameDrive(item.selectedDrive, currentBeforeVerification)
       await this.backupService.verify(currentBeforeVerification.mountPath, backup, item.request.verificationMode)
       await this.logger.write({ event: 'BACKUP_VERIFICATION_COMPLETE', operationId: operation.id, result: 'success' })
 
+      this.setState(operation, 'format-queued')
+      this.formatQueue.push(item)
+      this.drainFormatQueue()
+    } catch (error) {
+      await this.failOperation(operation, error)
+      this.releaseDisk(item.selectedDrive.physicalDiskIdentifier)
+    } finally {
+      this.abortControllers.delete(operation.id)
+      this.activeBackups -= 1
+      this.drainQueue()
+    }
+  }
+
+  private async runFormatOperation(item: QueueItem): Promise<void> {
+    const operation = this.operations.get(item.operationId)!
+    try {
       this.setState(operation, 'formatting')
       const formattedDrive = await this.formatService.formatAndVerify(
         item.selectedDrive,
         item.request.profile,
         item.request.backupRoot,
-        item.request.formatVolumeLabel,
         async (current, options) => {
+          for (const backupRoot of this.activeBackupRoots.values()) {
+            await this.driveService.assertBackupDestinationIsDifferentDrive(current, backupRoot)
+          }
           await this.logger.write({
             event: 'FORMAT_START',
             operationId: operation.id,
@@ -287,8 +319,7 @@ export class OperationService {
             displayName: operation.displayName,
             profile: item.request.profile,
             filesystem: options.filesystem,
-            allocationUnitSize: options.allocationUnitSize,
-            volumeLabel: options.volumeLabel
+            allocationUnitSize: options.allocationUnitSize
           })
         },
         () => this.setState(operation, 'format-verifying')
@@ -324,21 +355,32 @@ export class OperationService {
       await this.logger.write({ event: 'OPERATION_COMPLETE', operationId: operation.id, result: 'success' })
       this.publish(operation)
     } catch (error) {
-      const operationError = toOperationError(error)
-      if (operationError.code === 'DRIVE_NOT_FOUND') {
-        operationError.code = 'DEVICE_REMOVED'
-        operationError.message = '작업 중 SD 카드가 제거되었습니다.'
-      }
-      operation.state = operationError.code === 'BACKUP_CANCELLED' ? 'cancelled' : 'failed'
-      operation.error = operationError
-      operation.completedAt = new Date().toISOString()
-      await this.logger
-        .write({ event: 'OPERATION_FAILED', operationId: operation.id, result: 'failed', errorCode: operationError.code })
-        .catch(() => undefined)
-      this.publish(operation)
+      await this.failOperation(operation, error)
     } finally {
-      this.abortControllers.delete(operation.id)
+      this.releaseDisk(item.selectedDrive.physicalDiskIdentifier)
+      this.formatting = false
+      this.drainFormatQueue()
     }
+  }
+
+  private async failOperation(operation: SdOperation, error: unknown): Promise<void> {
+    const operationError = toOperationError(error)
+    if (operationError.code === 'DRIVE_NOT_FOUND') {
+      operationError.code = 'DEVICE_REMOVED'
+      operationError.message = '작업 중 SD 카드가 제거되었습니다.'
+    }
+    operation.state = operationError.code === 'BACKUP_CANCELLED' ? 'cancelled' : 'failed'
+    operation.error = operationError
+    operation.completedAt = new Date().toISOString()
+    await this.logger
+      .write({ event: 'OPERATION_FAILED', operationId: operation.id, result: 'failed', errorCode: operationError.code })
+      .catch(() => undefined)
+    this.publish(operation)
+  }
+
+  private releaseDisk(diskId: string): void {
+    this.reservedDisks.delete(diskId)
+    this.activeBackupRoots.delete(diskId)
   }
 
   private setState(operation: SdOperation, state: SdOperation['state']): void {

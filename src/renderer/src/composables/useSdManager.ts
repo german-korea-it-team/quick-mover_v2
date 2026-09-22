@@ -2,7 +2,6 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import type {
   AppSettings,
   BackupDateMode,
-  BackupFileFilter,
   BackupFolderSelection,
   BackupSelection,
   BackupTimeSlot,
@@ -16,7 +15,6 @@ import type {
   SdOperation
 } from '../../../shared/types'
 import { isValidBackupDate } from '../../../shared/backup-date'
-import { normalizeVolumeLabel } from '../../../shared/volume-label'
 
 export type BackupFolderMode = 'none' | BackupDateMode
 
@@ -95,16 +93,10 @@ export function useSdManager() {
     return cardSettingsForDrive(drive).displayName || ''
   }
 
-  function formatVolumeLabelForDrive(drive: RemovableDrive): string | undefined {
-    const label = normalizeVolumeLabel(cardSettingsForDrive(drive).formatVolumeLabel ?? '')
-    return label || undefined
-  }
-
   function cloneFolderSelection(selection: BackupFolderSelection): BackupFolderSelection {
     return {
       kind: 'folder',
       relativePath: selection.relativePath,
-      fileFilter: selection.fileFilter,
       includeSourceFolder: selection.includeSourceFolder
     }
   }
@@ -130,7 +122,6 @@ export function useSdManager() {
           physicalDiskIdentifier,
           {
             ...(cardSettings.displayName !== undefined ? { displayName: cardSettings.displayName } : {}),
-            ...(cardSettings.formatVolumeLabel !== undefined ? { formatVolumeLabel: cardSettings.formatVolumeLabel } : {}),
             ...(cardSettings.backupRoot !== undefined ? { backupRoot: cardSettings.backupRoot } : {}),
             createBackupFolder: cardSettings.createBackupFolder ?? true,
             backupDateMode: cardSettings.backupDateMode ?? 'auto',
@@ -220,7 +211,7 @@ export function useSdManager() {
     try {
       const relativePath = await window.sdManager.chooseSourceFolder(drive.id)
       if (!relativePath) return
-      backupSelections[drive.id] = { kind: 'folder', relativePath, fileFilter: 'all', includeSourceFolder: false }
+      backupSelections[drive.id] = { kind: 'folder', relativePath, includeSourceFolder: false }
       delete detectedBackupDates[drive.id]
     } catch {
       error.value = { code: 'INVALID_REQUEST', message: '선택한 폴더를 이 SD 카드의 백업 대상으로 사용할 수 없습니다.' }
@@ -247,18 +238,6 @@ export function useSdManager() {
   function folderSelectionForDrive(drive: RemovableDrive): BackupFolderSelection | undefined {
     const selection = backupSelections[drive.id]
     return selection?.kind === 'folder' ? selection : undefined
-  }
-
-  function folderFileFilterForDrive(drive: RemovableDrive): BackupFileFilter {
-    return folderSelectionForDrive(drive)?.fileFilter ?? 'all'
-  }
-
-  function setFolderFileFilterForDrive(drive: RemovableDrive, value: unknown): void {
-    const selection = folderSelectionForDrive(drive)
-    if (selection && (value === 'all' || value === 'mp4')) {
-      selection.fileFilter = value
-      delete detectedBackupDates[drive.id]
-    }
   }
 
   function includesSourceFolderForDrive(drive: RemovableDrive): boolean {
@@ -289,7 +268,6 @@ export function useSdManager() {
       id: existingIndex >= 0 ? settings.savedCardPresets[existingIndex]!.id : crypto.randomUUID(),
       name: normalizedName,
       ...(displayNameForDrive(drive) ? { displayName: displayNameForDrive(drive) } : {}),
-      ...(formatVolumeLabelForDrive(drive) ? { formatVolumeLabel: formatVolumeLabelForDrive(drive) } : {}),
       profile,
       backupRoot: backupRootForDrive(drive),
       createBackupFolder: createBackupFolderForDrive(drive),
@@ -306,7 +284,6 @@ export function useSdManager() {
   async function loadCardPreset(drive: RemovableDrive, preset: SavedCardPreset): Promise<void> {
     const cardSettings = cardSettingsForDrive(drive)
     cardSettings.displayName = preset.displayName
-    cardSettings.formatVolumeLabel = preset.formatVolumeLabel
     cardSettings.backupRoot = preset.backupRoot
     cardSettings.createBackupFolder = preset.createBackupFolder
     cardSettings.backupDateMode = preset.backupDateMode
@@ -381,7 +358,6 @@ export function useSdManager() {
     const request: ProcessSdCardRequest = {
       driveId: drive.id,
       displayName: displayNameForDrive(drive) || undefined,
-      formatVolumeLabel: formatVolumeLabelForDrive(drive),
       profile,
       backupTimeSlot: backupTimeSlots[drive.id] ?? 'single',
       backupRoot: backupRootForDrive(drive),
@@ -464,10 +440,7 @@ export function useSdManager() {
     cardSettingsForDrive,
     backupRootForDrive,
     displayNameForDrive,
-    formatVolumeLabelForDrive,
     folderSelectionForDrive,
-    folderFileFilterForDrive,
-    setFolderFileFilterForDrive,
     includesSourceFolderForDrive,
     setIncludesSourceFolderForDrive,
     saveCardPreset,

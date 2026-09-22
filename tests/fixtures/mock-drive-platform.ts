@@ -32,7 +32,7 @@ export class MockDrivePlatform implements DrivePlatform {
     if (!current) throw new SdManagerError('DRIVE_NOT_FOUND', 'Mock drive removed during format')
     current.filesystem = this.formattedFilesystem ?? options.filesystem
     current.allocationUnitSize = this.formattedAllocationUnitSize ?? options.allocationUnitSize ?? 32768
-    current.volumeLabel = options.volumeLabel ?? current.volumeLabel
+    current.volumeLabel = undefined
     current.volumeIdentifier = `${current.volumeIdentifier}-formatted`
     current.id = `${current.id}-formatted`
     return { filesystem: current.filesystem, allocationUnitSize: current.allocationUnitSize }

@@ -35,9 +35,6 @@ const {
   cardSettingsForDrive,
   folderSelectionForDrive,
   backupRootForDrive,
-  formatVolumeLabelForDrive,
-  folderFileFilterForDrive,
-  setFolderFileFilterForDrive,
   includesSourceFolderForDrive,
   setIncludesSourceFolderForDrive,
   saveCardPreset,
@@ -79,14 +76,15 @@ const verificationItems = [
   { title: '전체 검증 (SHA-256)', value: 'full' }
 ]
 
-const fileFilterItems = [
-  { title: '모든 파일', value: 'all' },
-  { title: 'MP4만', value: 'mp4' }
+const backupSourceItems = [
+  { title: '전체', value: 'all' },
+  { title: '폴더', value: 'folder' },
+  { title: '파일', value: 'files' }
 ]
+const sourceToggleKeys = ref<Record<string, number>>({})
 
 const TOOLTIP_LENGTH = {
   displayName: 14,
-  formatLabel: 9,
   backupPath: 40,
   backupSelection: 40
 } as const
@@ -99,6 +97,7 @@ const stateLabels: Record<SdOperation['state'], string> = {
   'backup-preparing': '백업 준비',
   'backing-up': '백업 중',
   'backup-verifying': '백업 검증',
+  'format-queued': '포맷 대기',
   formatting: '포맷 중',
   'format-verifying': '포맷 검증',
   'installing-config': '설정 복사',
@@ -172,8 +171,13 @@ function sourceSelectionDetail(drive: RemovableDrive): string {
   return `선택 파일 ${selection.relativePaths.length}개\n${paths.join('\n')}`
 }
 
-function fileFilterLabel(drive: RemovableDrive): string {
-  return folderFileFilterForDrive(drive) === 'mp4' ? 'MP4만' : '모든 파일'
+async function selectBackupSource(drive: RemovableDrive, value: unknown): Promise<void> {
+  if (activeDriveIds.value.has(drive.id)) return
+  if (value === 'folder') await chooseSourceFolder(drive)
+  else if (value === 'files') await chooseSourceFiles(drive)
+  else if (value === 'all') clearBackupSelection(drive)
+  // 탐색기 취소 시 버튼 선택도 실제 백업 범위로 되돌립니다.
+  sourceToggleKeys.value[drive.id] = (sourceToggleKeys.value[drive.id] ?? 0) + 1
 }
 
 function selectedFileCount(drive: RemovableDrive): number {
@@ -301,9 +305,6 @@ async function confirmStart(): Promise<void> {
                 <th class="name-column">
                   메모
                 </th>
-                <th class="format-label-column">
-                  볼륨 이름
-                </th>
                 <th>볼륨</th>
                 <th>용량</th>
                 <th class="backup-path-column">
@@ -360,7 +361,7 @@ async function confirmStart(): Promise<void> {
             </thead>
             <tbody>
               <tr v-if="drives.length === 0">
-                <td colspan="13" class="empty-row">
+                <td colspan="12" class="empty-row">
                   연결된 이동식 SD 카드가 없습니다.
                 </td>
               </tr>
@@ -388,29 +389,6 @@ async function confirmStart(): Promise<void> {
                       max-width="360"
                     >
                       {{ cardSettingsForDrive(drive).displayName }}
-                    </v-tooltip>
-                  </div>
-                </td>
-                <td>
-                  <div class="truncate-field">
-                    <v-text-field
-                      v-model="cardSettingsForDrive(drive).formatVolumeLabel"
-                      label="비우면 현재 이름 유지"
-                      density="compact"
-                      hide-details
-                      maxlength="11"
-                      :disabled="activeDriveIds.has(drive.id)"
-                      :data-testid="`format-label-${drive.driveLetter}`"
-                      @change="saveSettings"
-                    ></v-text-field>
-                    <v-tooltip
-                      v-if="hasLongText(cardSettingsForDrive(drive).formatVolumeLabel, TOOLTIP_LENGTH.formatLabel)"
-                      activator="parent"
-                      location="top"
-                      :open-delay="350"
-                      max-width="260"
-                    >
-                      {{ cardSettingsForDrive(drive).formatVolumeLabel }}
                     </v-tooltip>
                   </div>
                 </td>
@@ -521,6 +499,28 @@ async function confirmStart(): Promise<void> {
                   </div>
                 </td>
                 <td>
+                  <v-btn-toggle
+                    :key="sourceToggleKeys[drive.id] ?? 0"
+                    :model-value="backupSelections[drive.id]?.kind ?? 'all'"
+                    mandatory
+                    divided
+                    density="compact"
+                    variant="outlined"
+                    color="primary"
+                    aria-label="백업 대상 구분"
+                    :disabled="activeDriveIds.has(drive.id)"
+                    :data-testid="`source-kind-${drive.driveLetter}`"
+                    @update:model-value="selectBackupSource(drive, $event)"
+                  >
+                    <v-btn
+                      v-for="item in backupSourceItems"
+                      :key="item.value"
+                      :value="item.value"
+                      size="small"
+                    >
+                      {{ item.title }}
+                    </v-btn>
+                  </v-btn-toggle>
                   <div class="source-scope">
                     <span class="path-value">
                       {{ truncateText(sourceSelectionDisplay(drive), TOOLTIP_LENGTH.backupSelection) }}
@@ -535,45 +535,16 @@ async function confirmStart(): Promise<void> {
                       </v-tooltip>
                     </span>
                     <v-btn
-                      size="x-small"
-                      variant="text"
-                      :disabled="activeDriveIds.has(drive.id)"
-                      :data-testid="`choose-source-${drive.driveLetter}`"
-                      @click="chooseSourceFolder(drive)"
-                    >
-                      폴더
-                    </v-btn>
-                    <v-btn
-                      size="x-small"
-                      variant="text"
-                      :disabled="activeDriveIds.has(drive.id)"
-                      :data-testid="`choose-source-files-${drive.driveLetter}`"
-                      @click="chooseSourceFiles(drive)"
-                    >
-                      파일
-                    </v-btn>
-                    <v-btn
                       v-if="backupSelections[drive.id]"
                       size="x-small"
                       variant="text"
                       :disabled="activeDriveIds.has(drive.id)"
-                      :data-testid="`use-full-source-${drive.driveLetter}`"
-                      @click="clearBackupSelection(drive)"
+                      :data-testid="`change-source-${drive.driveLetter}`"
+                      @click="selectBackupSource(drive, backupSelections[drive.id]?.kind)"
                     >
-                      전체
+                      변경
                     </v-btn>
                   </div>
-                  <v-select
-                    v-if="folderSelectionForDrive(drive)"
-                    :model-value="folderFileFilterForDrive(drive)"
-                    :items="fileFilterItems"
-                    density="compact"
-                    hide-details
-                    aria-label="백업 파일 범위"
-                    :disabled="activeDriveIds.has(drive.id)"
-                    :data-testid="`source-filter-${drive.driveLetter}`"
-                    @update:model-value="setFolderFileFilterForDrive(drive, $event)"
-                  ></v-select>
                   <v-checkbox
                     v-if="folderSelectionForDrive(drive)"
                     :model-value="includesSourceFolderForDrive(drive)"
@@ -740,7 +711,7 @@ async function confirmStart(): Promise<void> {
               백업 대상: <strong>{{ sourceSelectionDisplay(confirmationDrive) }}</strong>
             </p>
             <p v-if="folderSelectionForDrive(confirmationDrive)" class="text-body-2 mb-2">
-              파일 범위: <strong>{{ fileFilterLabel(confirmationDrive) }}</strong> · 하위 폴더 포함 ·
+              하위 폴더 포함 ·
               선택 폴더 이름 <strong>{{ includesSourceFolderForDrive(confirmationDrive) ? '포함' : '제외' }}</strong>
             </p>
             <p v-else class="text-body-2 mb-2">
@@ -781,10 +752,6 @@ async function confirmStart(): Promise<void> {
               · 2 폴더 사용
             </span>
             <span v-else> · 별도 시간대 폴더 없음</span>
-          </p>
-          <p class="text-body-2">
-            포맷 후 볼륨 이름:
-            <strong>{{ formatVolumeLabelForDrive(confirmationDrive) || confirmationDrive.volumeLabel || '이름 없음' }}</strong>
           </p>
           <p class="text-body-2">
             상위 폴더:

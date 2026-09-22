@@ -60,12 +60,10 @@ $ErrorActionPreference = 'Stop'
 $letter = $args[0]
 $filesystem = $args[1]
 $allocation = $args[2]
-$volumeLabel = $args[3]
 if ($letter -notmatch '^[A-Z]$') { throw 'Invalid drive letter' }
 if ($filesystem -notin @('exFAT', 'FAT32')) { throw 'Invalid filesystem' }
 $params = @{ DriveLetter = $letter; FileSystem = $filesystem; Confirm = $false; Force = $true }
 if ($allocation) { $params.AllocationUnitSize = [uint32]$allocation }
-if ($volumeLabel) { $params.NewFileSystemLabel = $volumeLabel }
 Format-Volume @params | Out-Null
 $volume = Get-Volume -DriveLetter $letter
 $winVolume = Get-CimInstance Win32_Volume -Filter ("DriveLetter='" + $letter + ":'")
@@ -143,8 +141,7 @@ $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop
     const output = await runPowerShell(FORMAT_SCRIPT, [
       letter,
       options.filesystem,
-      options.allocationUnitSize?.toString() ?? '',
-      options.volumeLabel ?? ''
+      options.allocationUnitSize?.toString() ?? ''
     ])
     const parsed = JSON.parse(output) as { Filesystem: string; AllocationUnitSize?: number }
     return { filesystem: parsed.Filesystem, allocationUnitSize: parsed.AllocationUnitSize }

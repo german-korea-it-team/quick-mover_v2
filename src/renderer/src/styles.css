@@ -103,10 +103,6 @@ body,
   width: 240px;
 }
 
-.format-label-column {
-  min-width: 150px;
-}
-
 .action-column {
   width: 100px;
 }

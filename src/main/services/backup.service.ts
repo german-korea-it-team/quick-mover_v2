@@ -1,12 +1,11 @@
 import { createHash } from 'node:crypto'
-import { createReadStream, createWriteStream } from 'node:fs'
-import { access, lstat, mkdir, opendir, realpath, stat, utimes } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import { access, lstat, mkdir, open, opendir, realpath, stat, utimes } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import type {
   BackupDateMode,
-  BackupFileFilter,
   BackupSelection,
   BackupTimeSlot,
   DetectedBackupDate,
@@ -161,14 +160,9 @@ async function relativeSourceFilesFromPaths(cardRoot: string, selectedPaths: str
   return relativePaths
 }
 
-function includesFile(filePath: string, filter: BackupFileFilter): boolean {
-  return filter === 'all' || extname(filePath).toLowerCase() === '.mp4'
-}
-
 async function collectFiles(
   cardRoot: string,
   sourceRoot: string,
-  filter: BackupFileFilter,
   signal: AbortSignal
 ): Promise<SourceFile[]> {
   const files: SourceFile[] = []
@@ -185,7 +179,7 @@ async function collectFiles(
         throw new SdManagerError('BACKUP_FAILED', '심볼릭 링크가 포함된 카드는 안전하게 백업할 수 없습니다.', absolutePath)
       }
       if (entry.isDirectory()) await walk(absolutePath)
-      else if (entry.isFile() && includesFile(absolutePath, filter)) {
+      else if (entry.isFile()) {
         const metadata = await stat(absolutePath)
         const sourceRelativePath = relative(cardRoot, absolutePath)
         files.push({ sourceRelativePath, destinationRelativePath: sourceRelativePath, size: metadata.size, modifiedAt: metadata.mtime })
@@ -224,17 +218,16 @@ async function collectBackupSource(
   try {
     const cardRoot = await realpath(drive.mountPath)
     if (!backupSelection) {
-      return { files: await collectFiles(cardRoot, cardRoot, 'all', signal) }
+      return { files: await collectFiles(cardRoot, cardRoot, signal) }
     }
     if (backupSelection.kind === 'folder') {
       const selectedSource = await resolveSourceFolderFromRoot(cardRoot, backupSelection.relativePath)
       const selection: BackupSelection = {
         kind: 'folder',
         relativePath: selectedSource.relativePath,
-        fileFilter: backupSelection.fileFilter,
         includeSourceFolder: backupSelection.includeSourceFolder
       }
-      let files = await collectFiles(cardRoot, selectedSource.root, backupSelection.fileFilter, signal)
+      let files = await collectFiles(cardRoot, selectedSource.root, signal)
       if (!backupSelection.includeSourceFolder) {
         files = files.map((file) => ({
           ...file,
@@ -336,6 +329,22 @@ async function assignAvailableDestinationPaths(destination: string, files: Sourc
   return assignedFiles
 }
 
+// wx로 파일 생성을 선점합니다. 다른 백업이 먼저 만들었으면 새 이름으로 재시도합니다.
+async function openAvailableDestination(destination: string, relativePath: string, signal: AbortSignal) {
+  for (let suffix = 0; suffix <= 9999; suffix += 1) {
+    if (signal.aborted) throw new SdManagerError('BACKUP_CANCELLED', '백업이 취소되었습니다.')
+    const destinationRelativePath = suffix === 0 ? relativePath : addNumericSuffix(relativePath, suffix)
+    const targetPath = join(destination, destinationRelativePath)
+    try {
+      const handle = await open(targetPath, 'wx')
+      return { handle, targetPath, destinationRelativePath }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+  }
+  throw new SdManagerError('BACKUP_FAILED', '중복되지 않는 백업 파일 이름을 만들 수 없습니다.')
+}
+
 async function hashFile(filePath: string): Promise<string> {
   const hash = createHash('sha256')
   await pipeline(createReadStream(filePath), hash)
@@ -359,9 +368,6 @@ export class BackupService {
   async assertBackupSelectionAvailable(drive: RemovableDrive, selection: BackupSelection | undefined): Promise<void> {
     if (!selection) return
     if (selection.kind === 'folder') {
-      if (selection.fileFilter !== 'all' && selection.fileFilter !== 'mp4') {
-        throw new SdManagerError('INVALID_REQUEST', '백업 파일 범위가 올바르지 않습니다.')
-      }
       if (typeof selection.includeSourceFolder !== 'boolean') {
         throw new SdManagerError('INVALID_REQUEST', '선택 폴더 포함 옵션이 올바르지 않습니다.')
       }
@@ -413,7 +419,7 @@ export class BackupService {
     let { files } = source
     const { selection } = source
     if (selection && files.length === 0) {
-      throw new SdManagerError('BACKUP_FAILED', '선택한 백업 대상에 조건과 일치하는 파일이 없습니다. SD 카드는 포맷하지 않습니다.')
+      throw new SdManagerError('BACKUP_FAILED', '선택한 백업 대상에 파일이 없습니다. SD 카드는 포맷하지 않습니다.')
     }
     let backupDate: string | undefined
     if (createBackupFolder) {
@@ -467,16 +473,21 @@ export class BackupService {
     for (const file of files) {
       if (signal.aborted) throw new SdManagerError('BACKUP_CANCELLED', '백업이 취소되었습니다.')
       const sourcePath = join(drive.mountPath, file.sourceRelativePath)
-      const targetPath = join(destination, file.destinationRelativePath)
-      await mkdir(dirname(targetPath), { recursive: true })
-      const source = createReadStream(sourcePath)
-      source.on('data', (chunk: string | Buffer) => {
-        copiedBytes += Buffer.byteLength(chunk)
-        publish(file.sourceRelativePath)
-      })
       try {
-        await pipeline(source, createWriteStream(targetPath, { flags: 'wx' }), { signal })
-        await utimes(targetPath, file.modifiedAt, file.modifiedAt)
+        await mkdir(dirname(join(destination, file.destinationRelativePath)), { recursive: true })
+        const target = await openAvailableDestination(destination, file.destinationRelativePath, signal)
+        file.destinationRelativePath = target.destinationRelativePath
+        try {
+          const source = createReadStream(sourcePath)
+          source.on('data', (chunk: string | Buffer) => {
+            copiedBytes += Buffer.byteLength(chunk)
+            publish(file.sourceRelativePath)
+          })
+          await pipeline(source, target.handle.createWriteStream(), { signal })
+          await utimes(target.targetPath, file.modifiedAt, file.modifiedAt)
+        } finally {
+          await target.handle.close()
+        }
       } catch (error) {
         if (signal.aborted) throw new SdManagerError('BACKUP_CANCELLED', '백업이 취소되었습니다.')
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -496,13 +507,12 @@ export class BackupService {
       const cardRoot = await realpath(sourceRoot)
       let currentFiles: SourceFile[]
       if (!backup.selection) {
-        currentFiles = await collectFiles(cardRoot, cardRoot, 'all', new AbortController().signal)
+        currentFiles = await collectFiles(cardRoot, cardRoot, new AbortController().signal)
       } else if (backup.selection.kind === 'folder') {
         const selectedSource = await resolveSourceFolderFromRoot(cardRoot, backup.selection.relativePath)
         currentFiles = await collectFiles(
           cardRoot,
           selectedSource.root,
-          backup.selection.fileFilter,
           new AbortController().signal
         )
       } else {

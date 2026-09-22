@@ -13,7 +13,11 @@ for (const picker of ['choose-drive-backup', 'choose-source', 'choose-source-fil
     test(`${picker} 선택 후 ${modal} 모달을 닫고 다시 연다`, async ({ page }) => {
       await installApiMock(page, [createMockDrive()])
       await page.goto(appUrl)
-      await page.getByTestId(`${picker}-E:`).click()
+      if (picker === 'choose-drive-backup') {
+        await page.getByTestId(`${picker}-E:`).click()
+      } else {
+        await page.getByTestId('source-kind-E:').getByRole('button', { name: picker === 'choose-source' ? '폴더' : '파일', exact: true }).click()
+      }
       const opener = page.getByTestId(`${modal}-E:`)
       const dialog = page.getByRole('dialog')
       await opener.click()
@@ -150,6 +154,17 @@ test('사용자 확인 후 작업을 큐에 등록하고 포맷 단계에서 취
   await page.evaluate(() => {
     const harness = (window as unknown as { __quickMoverTest: { updateOperation(value: Record<string, unknown>): void } }).__quickMoverTest
     harness.updateOperation({
+      id: 'operation-1', driveId: 'PHYSICAL-1::VOLUME-1::1', driveLetter: 'E:', profile: 'blackbox',
+      state: 'format-queued',
+      progress: { processedFiles: 2, totalFiles: 2, copiedBytes: 100, totalBytes: 100, percent: 100 }
+    })
+  })
+  await expect(row.getByText('포맷 대기')).toBeVisible()
+  await expect(row.getByRole('button', { name: '취소' })).toHaveCount(0)
+
+  await page.evaluate(() => {
+    const harness = (window as unknown as { __quickMoverTest: { updateOperation(value: Record<string, unknown>): void } }).__quickMoverTest
+    harness.updateOperation({
       id: 'operation-1',
       driveId: 'PHYSICAL-1::VOLUME-1::1',
       driveLetter: 'E:',
@@ -163,16 +178,15 @@ test('사용자 확인 후 작업을 큐에 등록하고 포맷 단계에서 취
   await expect(row.getByRole('button', { name: '취소' })).toHaveCount(0)
 })
 
-test('탐색기에서 선택한 폴더의 MP4만 백업하려면 제외 데이터 삭제 동의가 필요하다', async ({ page }) => {
+test('탐색기에서 선택한 폴더를 백업하려면 제외 데이터 삭제 동의가 필요하다', async ({ page }) => {
   await installApiMock(page, [createMockDrive()])
   await page.goto(appUrl)
   const driveRow = page.getByTestId('drive-E:')
 
-  await driveRow.getByTestId('choose-source-E:').click()
+  await driveRow.getByTestId('source-kind-E:').getByRole('button', { name: '폴더', exact: true }).click()
   await expect(driveRow.getByText('E:\\Driving')).toBeVisible()
   await expect(driveRow.getByTestId('include-source-folder-E:').getByRole('checkbox')).not.toBeChecked()
-  await driveRow.getByLabel('백업 파일 범위').press('ArrowDown')
-  await page.getByRole('option', { name: 'MP4만' }).click()
+  await expect(driveRow.getByLabel('백업 파일 범위')).toHaveCount(0)
 
   await page.getByTestId('start-E:').click()
   await expect(page.getByText('선택하지 않은 파일과 폴더는 백업되지 않으며 포맷 후 삭제됩니다.')).toBeVisible()
@@ -188,7 +202,7 @@ test('탐색기에서 선택한 폴더의 MP4만 백업하려면 제외 데이�
     return harness.getLastRequest()
   })
   expect(lastRequest).toMatchObject({
-    backupSelection: { kind: 'folder', relativePath: 'Driving', fileFilter: 'mp4', includeSourceFolder: false },
+    backupSelection: { kind: 'folder', relativePath: 'Driving', includeSourceFolder: false },
     selectiveBackupConfirmed: true
   })
 })
@@ -198,7 +212,7 @@ test('탐색기에서 선택한 여러 파일만 백업 대상으로 전달한�
   await page.goto(appUrl)
   const driveRow = page.getByTestId('drive-E:')
 
-  await driveRow.getByTestId('choose-source-files-E:').click()
+  await driveRow.getByTestId('source-kind-E:').getByRole('button', { name: '파일', exact: true }).click()
   await expect(driveRow.getByText(/2개 파일 · front\.mp4, rear\.mp4/)).toBeVisible()
   await expect(driveRow.getByLabel('백업 파일 범위')).toHaveCount(0)
 
@@ -246,16 +260,14 @@ test('카드별 백업 경로와 앱 전용 표시 이름을 설정한다', asyn
 
   await driveRow.getByTestId('display-name-E:').locator('input').fill('차량 12번')
   await driveRow.getByTestId('display-name-E:').locator('input').press('Tab')
-  await driveRow.getByTestId('format-label-E:').locator('input').fill('CAR-12')
-  await driveRow.getByTestId('format-label-E:').locator('input').press('Tab')
   await driveRow.getByTestId('choose-drive-backup-E:').click()
   await expect(driveRow.getByText('D:\\Selected_Backup')).toBeVisible()
   await expect(page.getByText('설정을 저장하지 못했습니다.')).toHaveCount(0)
 
   await driveRow.getByTestId('start-E:').click()
   await expect(page.getByRole('dialog').getByText('D:\\Selected_Backup')).toBeVisible()
-  await expect(page.getByText('포맷 후 볼륨 이름:')).toBeVisible()
-  await expect(page.getByText('CAR-12')).toBeVisible()
+  await expect(page.getByTestId('format-label-E:')).toHaveCount(0)
+  await expect(page.getByText('포맷 후 볼륨 이름:')).toHaveCount(0)
   await page.getByTestId('confirm-start').click()
   await expect(page.getByTestId('operation-E:').getByText('차량 12번')).toBeVisible()
 })

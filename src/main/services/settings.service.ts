@@ -1,7 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { AppSettings, BackupFolderSelection, SavedCardPreset, SdCardSettings } from '../../shared/types'
-import { normalizeVolumeLabel, validateVolumeLabel } from '../../shared/volume-label'
 
 const DEFAULT_SETTINGS: AppSettings = {
   backupFavoritePaths: [],
@@ -16,12 +15,6 @@ function optionalDisplayName(value: unknown): string | undefined {
   return displayName && displayName.length <= 80 ? displayName : undefined
 }
 
-function optionalVolumeLabel(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined
-  const volumeLabel = normalizeVolumeLabel(value)
-  return volumeLabel && !validateVolumeLabel(volumeLabel) ? volumeLabel : undefined
-}
-
 function parseBackupFolderSelection(value: unknown): BackupFolderSelection | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   const candidate = value as Record<string, unknown>
@@ -29,7 +22,6 @@ function parseBackupFolderSelection(value: unknown): BackupFolderSelection | und
     candidate.kind !== 'folder' ||
     typeof candidate.relativePath !== 'string' ||
     !candidate.relativePath.trim() ||
-    (candidate.fileFilter !== 'all' && candidate.fileFilter !== 'mp4') ||
     typeof candidate.includeSourceFolder !== 'boolean'
   ) {
     return undefined
@@ -37,7 +29,6 @@ function parseBackupFolderSelection(value: unknown): BackupFolderSelection | und
   return {
     kind: 'folder',
     relativePath: candidate.relativePath.trim(),
-    fileFilter: candidate.fileFilter,
     includeSourceFolder: candidate.includeSourceFolder
   }
 }
@@ -71,10 +62,8 @@ function parseCardSettings(
     const createBackupFolder =
       typeof candidate.createBackupFolder === 'boolean' ? candidate.createBackupFolder : legacyCreateBackupFolder
     const displayName = optionalDisplayName(candidate.displayName)
-    const formatVolumeLabel = optionalVolumeLabel(candidate.formatVolumeLabel)
     settings[physicalDiskIdentifier] = {
       ...(displayName ? { displayName } : {}),
-      ...(formatVolumeLabel ? { formatVolumeLabel } : {}),
       ...(backupRoot ? { backupRoot } : {}),
       ...(createBackupFolder !== undefined ? { createBackupFolder } : {}),
       ...(candidate.backupDateMode === 'auto' || candidate.backupDateMode === 'manual'
@@ -120,12 +109,10 @@ function parseSavedCardPresets(value: unknown): SavedCardPreset[] {
     names.add(nameKey)
     const backupSelection = parseBackupFolderSelection(candidate.backupSelection)
     const displayName = optionalDisplayName(candidate.displayName)
-    const formatVolumeLabel = optionalVolumeLabel(candidate.formatVolumeLabel)
     presets.push({
       id,
       name,
       ...(displayName ? { displayName } : {}),
-      ...(formatVolumeLabel ? { formatVolumeLabel } : {}),
       profile: candidate.profile,
       backupRoot,
       createBackupFolder: candidate.createBackupFolder,

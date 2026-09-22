@@ -14,12 +14,10 @@ export interface AuditEvent {
   backupDate?: string
   backupDestination?: string
   backupSourceFolder?: string
-  backupFileFilter?: string
   backupSelectedFileCount?: number
   selectiveBackupConfirmed?: boolean
   filesystem?: string
   allocationUnitSize?: number
-  volumeLabel?: string
   result?: string
   errorCode?: string
 }
